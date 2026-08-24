@@ -1,6 +1,6 @@
 {
   "name": "nycu-library-mcp-wrapper",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "Cloudflare Workers wrapper for NYCU Library's official MCP server. Normalizes catalog search and account-dashboard tool results into full item-level Markdown content, so any MCP-compatible AI workspace (Open WebUI, Claude, ChatGPT, etc.) gives the model complete data instead of a one-line summary.",
   "main": "src/index.ts",
   "type": "module",
@@ -33,12 +33,14 @@
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.10.3",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "agents": "^0.20.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@types/node": "^26.2.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.123.0"

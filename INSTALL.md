@@ -21,7 +21,7 @@ cd nycu-library-mcp-wrapper
 npm install
 ```
 
-會安裝的套件：`@cloudflare/workers-oauth-provider`、`agents`、`@modelcontextprotocol/sdk`、`zod`，以及開發用的 `wrangler`。
+會安裝的套件：`@cloudflare/workers-oauth-provider`、`agents`、`@modelcontextprotocol/server`、`@modelcontextprotocol/client`、`zod`，以及開發用的 `wrangler`。
 
 ## 2. 讓 `wrangler` 完成 Cloudflare 認證
 
@@ -93,7 +93,9 @@ npx @modelcontextprotocol/inspector http://localhost:8787/mcp
 ```
 - Transport type：**Streamable HTTP**
 - URL：`http://localhost:8787/mcp`
-- 點 Connect → 會被導去 NYCU SSO 登入頁 → 成功後，Tools 分頁應該會看到 `search` 和 `fetch`
+- 點 Connect → 會被導去 NYCU SSO 登入頁 → 成功後，Tools 分頁應該會看到四個工具：`search`、`fetch`、`reauth`、`remove_auth`
+
+建議至少測過一次完整的 `reauth` 流程：先呼叫 `remove_auth` 清掉目前的授權，再呼叫 `search` 確認會收到「請重新授權」的提示，接著呼叫 `reauth` 拿到連結、在瀏覽器打開完成 NYCU 登入，最後重試 `search` 確認恢復正常。
 
 如果你在遠端伺服器上測試，Inspector 的 port 也要照第 2 步（方式 A）做 forwarding。
 
@@ -139,7 +141,7 @@ npx wrangler kv key delete "nycu_dcr_client_id" --namespace-id=<你的KV id> --r
 npx wrangler kv key list --namespace-id=<你的KV id> --remote
 npx wrangler kv key delete "<過期的key>" --namespace-id=<你的KV id> --remote
 ```
-這不是必須的動作——殘留的 key（舊的 `nycu_token:*`、`session:*`）不會造成任何衝突，設過 TTL 的會自動過期（session/PKCE），token 本身也會在約 3 天後自然失效。
+這不是必須的動作——殘留的 key（舊的 `nycu_token:*`、`pkce:*`、`reauth_nonce:*`）不會造成任何衝突，設過 TTL 的會自動過期，token 本身也會在約 3 天後自然失效。
 
 ---
 
@@ -160,12 +162,11 @@ npx wrangler kv key delete "<過期的key>" --namespace-id=<你的KV id> --remot
 | `Cannot read properties of undefined (reading 'parseAuthRequest')` | 在 `auth-handler.ts` 裡用了 `ctx.OAUTH_PROVIDER`，應該是 `env.OAUTH_PROVIDER`。 |
 | `Could not resolve "workers-oauth-provider"` | 套件名稱有 scope：`@cloudflare/workers-oauth-provider`，不是 `workers-oauth-provider`。 |
 | `Could not find McpAgent binding for MCP_OBJECT` | 用了已被棄用的 `McpAgent`/Durable Object 架構。改用 `agents/mcp` 的 `createMcpHandler`（見 `src/mcp-server.ts`），不需要 Durable Object binding。 |
+| `Could not resolve "@modelcontextprotocol/sdk"` | 這個套件已經拆分成 `@modelcontextprotocol/server`（server 端）跟 `@modelcontextprotocol/client`（呼叫 upstream 用），確認 `package.json` 跟 import 語句都改用新套件名稱。 |
 | `/mcp` 回 `404 Not Found` | 檢查 `index.ts` 裡的 `apiRoute` 跟你實際呼叫的路徑是否一致，也確認你的 AI workspace 填的 URL 有帶 `/mcp`。 |
-| `Not Acceptable: Client must accept both application/json and text/event-stream` | 呼叫上游時漏帶 `Accept: application/json, text/event-stream` header。 |
-| `Bad Request: Missing session ID` | 跳過了 `initialize` handshake 就直接打 `tools/call`。上游要求每次請求都要帶著前一次 `initialize` 回應裡的 `Mcp-Session-Id`。 |
-| `Unexpected token 'e', "event: mes"... is not valid JSON` | 上游用 SSE（`text/event-stream`）格式回應，不是單純 JSON，要用能解析 SSE 的 reader（見 `src/mcp-server.ts` 的 `readMcpResponse()`）。 |
+| `reauth` 連結打開後顯示「此連結已失效或已使用過」 | nonce 已經被用過一次，或超過 10 分鐘 TTL 過期了——正常行為，回到聊天視窗重新呼叫一次 `reauth` 取得新連結即可。 |
 | 你的 AI workspace 顯示籠統的 `Failed to connect to MCP server` | 開著 `npx wrangler tail` 重新連線一次，看真正的請求/回應內容。常見原因是 KV 裡快取了用 `localhost` 註冊的舊 `client_id`（見第 6 步）。 |
-| 用了約 3 天後突然失效 | 正常現象——NYCU token 沒有 refresh grant，透過你的 AI workspace 的 OAuth 提示重新登入即可。 |
+| 用了約 3 天後突然失效 | 正常現象——NYCU token 沒有 refresh grant。請模型呼叫 `reauth` 取得重新登入連結，或直接跟模型說「重新授權」。 |
 
 架構細節與上游回應結構請見 [SPEC.md](./SPEC.md)。
 
@@ -192,7 +193,7 @@ cd nycu-library-mcp-wrapper
 npm install
 ```
 
-Dependencies installed: `@cloudflare/workers-oauth-provider`, `agents`, `@modelcontextprotocol/sdk`, `zod`, plus `wrangler` as a dev tool.
+Dependencies installed: `@cloudflare/workers-oauth-provider`, `agents`, `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, `zod`, plus `wrangler` as a dev tool.
 
 ## 2. Authenticate `wrangler` with Cloudflare
 
@@ -264,7 +265,9 @@ npx @modelcontextprotocol/inspector http://localhost:8787/mcp
 ```
 - Transport type: **Streamable HTTP**
 - URL: `http://localhost:8787/mcp`
-- Connect → you'll be redirected through NYCU SSO login → on success, the `search` and `fetch` tools should appear in the Tools tab.
+- Connect → you'll be redirected through NYCU SSO login → on success, four tools should appear in the Tools tab: `search`, `fetch`, `reauth`, `remove_auth`.
+
+It's worth exercising the full `reauth` path at least once: call `remove_auth` to clear your current authorization, call `search` and confirm you get a "please re-authenticate" prompt, call `reauth` to get a link, open it in a browser and complete NYCU login, then retry `search` and confirm it works again.
 
 If you're testing from a remote server, forward the Inspector's local port the same way as in step 2 (Option A).
 
@@ -310,7 +313,7 @@ Clean up test data accumulated during local development:
 npx wrangler kv key list --namespace-id=<your-kv-id> --remote
 npx wrangler kv key delete "<stale-key>" --namespace-id=<your-kv-id> --remote
 ```
-This is not required for correct operation — leftover keys (old `nycu_token:*`, `session:*`) don't conflict with anything and expire on their own (session/PKCE keys have TTLs) or simply go stale (tokens become invalid after ~3 days regardless).
+This is not required for correct operation — leftover keys (old `nycu_token:*`, `pkce:*`, `reauth_nonce:*`) don't conflict with anything and expire on their own (all of them carry TTLs), or simply go stale (tokens become invalid after ~3 days regardless).
 
 ---
 
@@ -331,11 +334,10 @@ This project's code is licensed under the MIT License — see [LICENSE](./LICENS
 | `Cannot read properties of undefined (reading 'parseAuthRequest')` | You're accessing `ctx.OAUTH_PROVIDER` instead of `env.OAUTH_PROVIDER` in `auth-handler.ts`. |
 | `Could not resolve "workers-oauth-provider"` | Package name is scoped: `@cloudflare/workers-oauth-provider`, not `workers-oauth-provider`. |
 | `Could not find McpAgent binding for MCP_OBJECT` | You're using the deprecated `McpAgent`/Durable Object path. Switch to `createMcpHandler` from `agents/mcp` (see `src/mcp-server.ts`) — no Durable Object binding needed. |
+| `Could not resolve "@modelcontextprotocol/sdk"` | That package has been split into `@modelcontextprotocol/server` (server side) and `@modelcontextprotocol/client` (used to call the upstream). Update `package.json` and your imports to use the new package names. |
 | `404 Not Found` on `/mcp` | Check `apiRoute` in `index.ts` matches the path you're calling, and that your AI workspace's configured URL includes `/mcp`. |
-| `Not Acceptable: Client must accept both application/json and text/event-stream` | Outbound request to upstream is missing the `Accept: application/json, text/event-stream` header. |
-| `Bad Request: Missing session ID` | You skipped the `initialize` handshake before `tools/call`. The upstream MCP server requires an `Mcp-Session-Id` from a prior `initialize` response on every subsequent request. |
-| `Unexpected token 'e', "event: mes"... is not valid JSON` | Upstream responded with SSE (`text/event-stream`), not plain JSON. Use an SSE-aware response parser (see `readMcpResponse()` in `src/mcp-server.ts`). |
+| Opening a `reauth` link shows "this link has expired or already been used" | The nonce was already consumed, or its 10-minute TTL expired — this is expected. Go back to the chat and call `reauth` again for a fresh link. |
 | Your AI workspace shows a generic `Failed to connect to MCP server` | Run `npx wrangler tail` while retrying to see the real request/response. Common cause: a stale `nycu_dcr_client_id` registered with a `localhost` redirect URI (see step 6). |
-| Everything worked, then stopped after ~3 days | Expected — NYCU tokens have no refresh grant. Re-authenticate via your AI workspace's OAuth prompt. |
+| Everything worked, then stopped after ~3 days | Expected — NYCU tokens have no refresh grant. Ask the model to call `reauth`, or just tell it to "re-authenticate." |
 
 For architecture details and upstream response schemas, see [SPEC.md](./SPEC.md).

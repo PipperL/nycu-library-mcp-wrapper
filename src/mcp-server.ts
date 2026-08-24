@@ -1,15 +1,18 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { Client, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
-// 若上面這行 import 在你的 agents 版本 resolve 不到，改成：
-// import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 
 const UPSTREAM_MCP_URL = "https://mcp.lib.nycu.edu.tw/mcp";
-const SESSION_TTL_SECONDS = 240;
+const REAUTH_NONCE_TTL_SECONDS = 600;
 
 interface Env {
   OAUTH_KV: KVNamespace;
 }
+
+/** 代表「需要使用者重新授權」的錯誤，跟其他一般上游/解析錯誤區分開，
+ *  讓 search/fetch 的 catch 區塊可以回傳專門指引模型呼叫 reauth 的訊息。 */
+class AuthRequiredError extends Error {}
 
 // ---------------------------------------------------------------------------
 // Catalog normalize（search 工具用）
@@ -191,41 +194,6 @@ function renderAccountModelContent(loans: LoanItem[], requests: RequestItem[], p
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// SSE / JSON-RPC response 解析
-// ---------------------------------------------------------------------------
-
-async function readMcpResponse(resp: Response): Promise<any> {
-  const contentType = resp.headers.get("content-type") || "";
-
-  if (contentType.includes("application/json")) {
-    return resp.json();
-  }
-
-  if (contentType.includes("text/event-stream")) {
-    const text = await resp.text();
-    const messages: any[] = [];
-    for (const block of text.split("\n\n")) {
-      const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
-      if (dataLine) {
-        try {
-          messages.push(JSON.parse(dataLine.slice(5).trim()));
-        } catch {
-          // 忽略無法解析的片段
-        }
-      }
-    }
-    const found = messages.reverse().find((m) => "result" in m || "error" in m);
-    if (!found) {
-      throw new Error(`No valid JSON-RPC message in SSE stream: ${text.slice(0, 200)}`);
-    }
-    return found;
-  }
-
-  const bodyPreview = (await resp.text()).slice(0, 200);
-  throw new Error(`Unexpected content-type: ${contentType}, body: ${bodyPreview}`);
-}
-
 /** 優先讀 structuredContent（乾淨的 JSON），content[].text 可能帶 "[ui_payload]" 前綴，作為備援才嘗試清洗解析。 */
 function extractPayload(toolResult: any): any {
   if (toolResult?.structuredContent) return toolResult.structuredContent;
@@ -245,101 +213,36 @@ function extractPayload(toolResult: any): any {
 }
 
 // ---------------------------------------------------------------------------
-// Session 快取 + 上游 MCP client
+// Upstream MCP client（改用官方 @modelcontextprotocol/client，
+// 不再手寫 fetch / SSE 解析 / session 快取——upstream 已遷移到 2026-07-28
+// 無狀態協定修訂版，官方 client 會自動處理協定版本協商跟連線細節）
 // ---------------------------------------------------------------------------
 
-function buildHeaders(accessToken: string, sessionId?: string) {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-  };
-  if (sessionId) headers["Mcp-Session-Id"] = sessionId;
-  return headers;
-}
-
-async function initializeSession(accessToken: string): Promise<string> {
-  const initResp = await fetch(UPSTREAM_MCP_URL, {
-    method: "POST",
-    headers: buildHeaders(accessToken),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: crypto.randomUUID(),
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "nycu-library-mcp-wrapper", version: "1.0.0" },
-      },
-    }),
-  });
-  if (initResp.status === 401) throw new Error("NYCU 授權已過期，請重新登入。");
-  const sessionId = initResp.headers.get("mcp-session-id");
-  if (!sessionId) throw new Error(`Upstream initialize failed: ${await initResp.text()}`);
-
-  await fetch(UPSTREAM_MCP_URL, {
-    method: "POST",
-    headers: buildHeaders(accessToken, sessionId),
-    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-  });
-
-  return sessionId;
-}
-
-async function getSessionId(env: Env, grantId: string, accessToken: string): Promise<string> {
-  const cacheKey = `session:${grantId}`;
-  const cached = await env.OAUTH_KV.get(cacheKey);
-  if (cached) return cached;
-
-  const sessionId = await initializeSession(accessToken);
-  await env.OAUTH_KV.put(cacheKey, sessionId, { expirationTtl: SESSION_TTL_SECONDS });
-  return sessionId;
-}
-
-function looksLikeSessionError(message: string): boolean {
-  return /session/i.test(message);
-}
-
 async function callUpstreamTool(
-  env: Env,
-  grantId: string,
   accessToken: string,
   toolName: string,
   args: Record<string, any>
 ): Promise<any> {
-  let sessionId = await getSessionId(env, grantId, accessToken);
+  const transport = new StreamableHTTPClientTransport(new URL(UPSTREAM_MCP_URL), {
+    authProvider: { token: async () => accessToken },
+  });
 
-  const doCall = async (sid: string) =>
-    fetch(UPSTREAM_MCP_URL, {
-      method: "POST",
-      headers: buildHeaders(accessToken, sid),
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: crypto.randomUUID(),
-        method: "tools/call",
-        params: { name: toolName, arguments: args },
-      }),
-    });
-
-  let resp = await doCall(sessionId);
-  if (resp.status === 401) throw new Error("NYCU 授權已過期，請重新登入。");
+  const client = new Client({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
 
   try {
-    const rpcResult: any = await readMcpResponse(resp);
-    if (rpcResult.error) throw new Error(JSON.stringify(rpcResult.error));
-    return rpcResult.result;
+    await client.connect(transport);
+    return await client.callTool({ name: toolName, arguments: args });
   } catch (e: any) {
-    if (!looksLikeSessionError(e.message)) throw e;
-
-    await env.OAUTH_KV.delete(`session:${grantId}`);
-    sessionId = await initializeSession(accessToken);
-    await env.OAUTH_KV.put(`session:${grantId}`, sessionId, { expirationTtl: SESSION_TTL_SECONDS });
-
-    resp = await doCall(sessionId);
-    if (resp.status === 401) throw new Error("NYCU 授權已過期，請重新登入。");
-    const rpcResult: any = await readMcpResponse(resp);
-    if (rpcResult.error) throw new Error(JSON.stringify(rpcResult.error));
-    return rpcResult.result;
+    if (e instanceof UnauthorizedError) {
+      throw new AuthRequiredError("NYCU 授權已過期，請重新登入。");
+    }
+    throw e;
+  } finally {
+    try {
+      await client.close();
+    } catch {
+      // 關閉連線失敗不影響本次呼叫結果，忽略即可
+    }
   }
 }
 
@@ -348,9 +251,9 @@ async function callUpstreamTool(
 // ---------------------------------------------------------------------------
 
 function buildCatalogResult(payload: any, max: number) {
-  const items: CatalogItem[] = payload.data.items.map(normalizeCatalogItem);
+  const items: CatalogItem[] = (payload.data ?? []).map(normalizeCatalogItem);
   const shown = items.slice(0, max);
-  const hasMore = Boolean(payload.data.has_more) || items.length > shown.length;
+  const hasMore = items.length > shown.length;
 
   const summary = hasMore
     ? `Showing first ${shown.length} of ${items.length}+ catalog items.`
@@ -412,14 +315,31 @@ function buildFallbackResult(toolResult: any, parsedPayload: any) {
 }
 
 function buildErrorResult(message: string) {
-  return { content: [{ type: "text" as const, text: message }] };
+  return { content: [{ type: "text" as const, text: message }], isError: true };
 }
 
-/** 依實際 payload 形狀判斷是 catalog 還是 account dashboard，viewType 缺失時用形狀推斷。 */
+/** 授權過期／未授權時的專用回覆：明確指引模型接著呼叫 reauth。 */
+function buildAuthRequiredResult() {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          "NYCU 圖書館授權已過期或尚未完成登入，需要重新授權才能查詢。\n\n" +
+          "請呼叫 reauth 這個工具取得一次性的重新登入連結，並將連結提供給使用者，" +
+          "由使用者在瀏覽器中完成 NYCU 登入後再重試剛才的查詢。",
+      },
+    ],
+    isError: true,
+  };
+}
+
+/** 依實際 payload 形狀判斷是 catalog 還是 account dashboard，viewType 缺失時用形狀推斷。
+ *  catalog 的 data 是陣列本身（不是 { items: [...] }），account dashboard 才是帶 loans/requests 的物件。 */
 function routePayload(payload: any, max: number) {
   if (!payload) return null;
 
-  if (payload.viewType === "catalog" || Array.isArray(payload.data?.items)) {
+  if (payload.viewType === "catalog" || Array.isArray(payload.data)) {
     return buildCatalogResult(payload, max);
   }
   if (
@@ -434,41 +354,64 @@ function routePayload(payload: any, max: number) {
 }
 
 // ---------------------------------------------------------------------------
-// MCP server：search / fetch（不包 fetch_account_page，官方標明非給模型用）
+// MCP server：search / fetch / reauth / remove_auth
+// （不包 fetch_account_page，官方標明非給模型用）
+//
+// baseUrl 是每次請求動態算出來的（見檔案最下方 apiHandler），
+// 不是寫死的常數或環境變數，本機 wrangler dev 跑出來就是 http://localhost:8787，
+// 正式環境跑出來就是實際部署網址，兩邊都能各自完整測試 reauth 流程。
+//
+// annotations：readOnlyHint/destructiveHint 用來讓支援的 client 判斷是否需要
+// 跳出確認框；openWorldHint 依使用者決定全部設為 false。
 // ---------------------------------------------------------------------------
 
-function buildServer(env: Env) {
-  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.2.0" });
+function buildServer(env: Env, baseUrl: string) {
+  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
 
-  async function getAccessTokenOrThrow(): Promise<{ grantId: string; accessToken: string }> {
+  function getGrantIdOrThrow(): string {
     const auth: any = getMcpAuthContext();
     const grantId = auth?.props?.grantId;
-    if (!grantId) throw new Error("No NYCU token found. Please re-authenticate.");
+    if (!grantId) throw new AuthRequiredError("No NYCU grant found. Please re-authenticate.");
+    return grantId;
+  }
+
+  async function getAccessTokenOrThrow(): Promise<{ grantId: string; accessToken: string }> {
+    const grantId = getGrantIdOrThrow();
 
     const tokenRecord = await env.OAUTH_KV.get(`nycu_token:${grantId}`);
-    if (!tokenRecord) throw new Error("No NYCU token found. Please re-authenticate.");
+    if (!tokenRecord) throw new AuthRequiredError("No NYCU token found. Please re-authenticate.");
 
     const { access_token } = JSON.parse(tokenRecord);
     return { grantId, accessToken: access_token };
   }
 
-  server.tool(
+  server.registerTool(
     "search",
     {
-      query: z.string(),
-      resource_type: z.string().optional(),
-      search_by: z.string().optional(),
-      access: z.string().optional(),
-      scope: z.string().optional(),
-      sort: z.string().optional(),
-      offset: z.number().optional().describe("分頁位移量，配合 has_more 往後翻頁"),
-      max: z.number().optional().describe("這次顯示在 content 裡的筆數上限，預設 5"),
+      description: "搜尋陽明交大圖書館館藏，包含各校區館藏狀態與索書號。",
+      inputSchema: z.object({
+        query: z.string(),
+        resource_type: z.string().optional(),
+        search_by: z.string().optional(),
+        access: z.string().optional(),
+        scope: z.string().optional(),
+        sort: z.string().optional(),
+        offset: z.number().optional().describe("分頁位移量，配合 has_more 往後翻頁"),
+        max: z.number().optional().describe("這次顯示在 content 裡的筆數上限，預設 5"),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ query, resource_type, search_by, access, scope, sort, offset, max }) => {
-      let grantId: string, accessToken: string;
+      let accessToken: string;
       try {
-        ({ grantId, accessToken } = await getAccessTokenOrThrow());
+        ({ accessToken } = await getAccessTokenOrThrow());
       } catch (e: any) {
+        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
         return buildErrorResult(e.message);
       }
 
@@ -484,8 +427,9 @@ function buildServer(env: Env) {
 
       let toolResult: any;
       try {
-        toolResult = await callUpstreamTool(env, grantId, accessToken, "search", args);
+        toolResult = await callUpstreamTool(accessToken, "search", args);
       } catch (e: any) {
+        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
         return buildErrorResult(e.message);
       }
 
@@ -496,32 +440,128 @@ function buildServer(env: Env) {
   );
 
   // fetch：借閱紀錄 / 預約 / 採購申請儀表板。無參數（身分從 token 解析）。
-  server.tool("fetch", {}, async () => {
-    let grantId: string, accessToken: string;
-    try {
-      ({ grantId, accessToken } = await getAccessTokenOrThrow());
-    } catch (e: any) {
-      return buildErrorResult(e.message);
-    }
+  server.registerTool(
+    "fetch",
+    {
+      description: "查詢我目前的圖書館帳戶：借閱中、預約中、採購申請。",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      let accessToken: string;
+      try {
+        ({ accessToken } = await getAccessTokenOrThrow());
+      } catch (e: any) {
+        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+        return buildErrorResult(e.message);
+      }
 
-    let toolResult: any;
-    try {
-      toolResult = await callUpstreamTool(env, grantId, accessToken, "fetch", {});
-    } catch (e: any) {
-      return buildErrorResult(e.message);
-    }
+      let toolResult: any;
+      try {
+        toolResult = await callUpstreamTool(accessToken, "fetch", {});
+      } catch (e: any) {
+        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+        return buildErrorResult(e.message);
+      }
 
-    const payload = extractPayload(toolResult);
-    const routed = routePayload(payload, 5);
-    return routed ?? buildFallbackResult(toolResult, payload);
-  });
+      const payload = extractPayload(toolResult);
+      const routed = routePayload(payload, 5);
+      return routed ?? buildFallbackResult(toolResult, payload);
+    }
+  );
+
+  // reauth：授權過期時呼叫，回傳一次性、10 分鐘內有效的重新登入連結。
+  // baseUrl 是這次請求實際打進來的網址（本機測試就是 localhost，正式環境就是正式網址）。
+  server.registerTool(
+    "reauth",
+    {
+      description: "當 search 或 fetch 回報授權過期時呼叫，取得重新登入連結。",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      let grantId: string;
+      try {
+        grantId = getGrantIdOrThrow();
+      } catch {
+        return buildErrorResult(
+          "目前沒有偵測到任何授權狀態，請透過原本的 MCP 連線設定流程完成一次初始授權。"
+        );
+      }
+
+      const nonce = crypto.randomUUID();
+      await env.OAUTH_KV.put(
+        `reauth_nonce:${nonce}`,
+        JSON.stringify({ grantId }),
+        { expirationTtl: REAUTH_NONCE_TTL_SECONDS }
+      );
+
+      const reauthUrl = `${baseUrl}/reauth/${nonce}`;
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `請在瀏覽器中打開以下連結，重新登入 NYCU 帳號完成授權：\n\n` +
+              `[點此重新登入](${reauthUrl})\n\n` +
+              `此連結 10 分鐘內有效，且只能使用一次。登入完成後，回到這裡重新送出剛才的查詢即可。`,
+          },
+        ],
+      };
+    }
+  );
+
+  // remove_auth：手動清除目前快取的 NYCU token。
+  server.registerTool(
+    "remove_auth",
+    {
+      description: "手動清除目前快取的 NYCU 授權，用於登出或懷疑 token 異常時。",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      let grantId: string;
+      try {
+        grantId = getGrantIdOrThrow();
+      } catch {
+        return buildErrorResult("目前沒有偵測到任何授權狀態，無需移除。");
+      }
+
+      await env.OAUTH_KV.delete(`nycu_token:${grantId}`);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              "已移除目前快取的 NYCU 授權。下次查詢會提示需要重新登入；" +
+              "也可以直接呼叫 reauth 立即取得重新登入連結。",
+          },
+        ],
+      };
+    }
+  );
 
   return server;
 }
 
 export const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const handler = createMcpHandler(() => buildServer(env), { route: "/mcp" });
+    const baseUrl = new URL(request.url).origin;
+    const handler = createMcpHandler(() => buildServer(env, baseUrl), { route: "/mcp" });
     return handler(request, env, ctx);
   },
 };
