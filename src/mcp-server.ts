@@ -18,13 +18,13 @@ class AuthRequiredError extends Error {}
 // Catalog normalize（search 工具用）
 // ---------------------------------------------------------------------------
 
-interface LocationInfo {
+export interface LocationInfo {
   location: string;
   availability: string;
   callNumber: string;
 }
 
-interface CatalogItem {
+export interface CatalogItem {
   title: string;
   author: string;
   year: string;
@@ -34,7 +34,7 @@ interface CatalogItem {
   locations: LocationInfo[];
 }
 
-function normalizeCatalogItem(raw: any): CatalogItem {
+export function normalizeCatalogItem(raw: any): CatalogItem {
   return {
     title: raw.title ?? "",
     author: raw.author ?? "",
@@ -50,7 +50,7 @@ function normalizeCatalogItem(raw: any): CatalogItem {
   };
 }
 
-function renderCatalogMarkdown(
+export function renderCatalogMarkdown(
   items: CatalogItem[],
   total: number,
   shown: number,
@@ -80,7 +80,7 @@ function renderCatalogMarkdown(
   return md;
 }
 
-function renderCatalogModelContent(items: CatalogItem[], total: number): string {
+export function renderCatalogModelContent(items: CatalogItem[], total: number): string {
   let out = `Catalog search returned ${total} items.\n`;
   items.forEach((it, i) => {
     out += `${i + 1}. ${it.title}\n   Author: ${it.author}\n   Year: ${it.year}\n`;
@@ -98,7 +98,7 @@ function renderCatalogModelContent(items: CatalogItem[], total: number): string 
 // 不是照 tool description 裡寫的 camelCase。
 // ---------------------------------------------------------------------------
 
-interface LoanItem {
+export interface LoanItem {
   title: string;
   author: string;
   dueDate: string;
@@ -108,21 +108,21 @@ interface LoanItem {
   loanFine: string;
 }
 
-interface RequestItem {
+export interface RequestItem {
   title: string;
   status: string;
   pickupLocation: string;
   expiryDate: string;
 }
 
-interface PurchaseRequestItem {
+export interface PurchaseRequestItem {
   title: string;
   status: string;
   createdAt: string;
   isbn: string;
 }
 
-function normalizeLoan(raw: any): LoanItem {
+export function normalizeLoan(raw: any): LoanItem {
   return {
     title: raw.title ?? "",
     author: raw.author ?? "",
@@ -134,7 +134,7 @@ function normalizeLoan(raw: any): LoanItem {
   };
 }
 
-function normalizeRequest(raw: any): RequestItem {
+export function normalizeRequest(raw: any): RequestItem {
   return {
     title: raw.title ?? "",
     status: raw.status ?? "",
@@ -143,7 +143,7 @@ function normalizeRequest(raw: any): RequestItem {
   };
 }
 
-function normalizePurchaseRequest(raw: any): PurchaseRequestItem {
+export function normalizePurchaseRequest(raw: any): PurchaseRequestItem {
   return {
     title: raw.title ?? "",
     status: raw.status ?? "",
@@ -152,7 +152,7 @@ function normalizePurchaseRequest(raw: any): PurchaseRequestItem {
   };
 }
 
-function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[], purchaseRequests: PurchaseRequestItem[]): string {
+export function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[], purchaseRequests: PurchaseRequestItem[]): string {
   let md = `### My Library Account\n\n`;
   md += `${loans.length} loans, ${requests.length} requests, ${purchaseRequests.length} purchase requests\n\n`;
 
@@ -180,7 +180,7 @@ function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[], purch
   return md;
 }
 
-function renderAccountModelContent(loans: LoanItem[], requests: RequestItem[], purchaseRequests: PurchaseRequestItem[]): string {
+export function renderAccountModelContent(loans: LoanItem[], requests: RequestItem[], purchaseRequests: PurchaseRequestItem[]): string {
   let out = `Account dashboard: ${loans.length} loans, ${requests.length} requests, ${purchaseRequests.length} purchase requests.\n`;
   loans.forEach((l, i) => {
     out += `Loan ${i + 1}: ${l.title} | Author: ${l.author} | Due: ${l.dueDate} | Fine: ${l.loanFine || "none"}\n`;
@@ -195,7 +195,7 @@ function renderAccountModelContent(loans: LoanItem[], requests: RequestItem[], p
 }
 
 /** 優先讀 structuredContent（乾淨的 JSON），content[].text 可能帶 "[ui_payload]" 前綴，作為備援才嘗試清洗解析。 */
-function extractPayload(toolResult: any): any {
+export function extractPayload(toolResult: any): any {
   if (toolResult?.structuredContent) return toolResult.structuredContent;
 
   const textBlock = toolResult?.content?.find((c: any) => c.type === "text");
@@ -250,7 +250,7 @@ async function callUpstreamTool(
 // 正規化輸出建構
 // ---------------------------------------------------------------------------
 
-function buildCatalogResult(payload: any, max: number) {
+export function buildCatalogResult(payload: any, max: number) {
   const items: CatalogItem[] = (payload.data ?? []).map(normalizeCatalogItem);
   const shown = items.slice(0, max);
   const hasMore = items.length > shown.length;
@@ -274,7 +274,7 @@ function buildCatalogResult(payload: any, max: number) {
   };
 }
 
-function buildAccountResult(payload: any) {
+export function buildAccountResult(payload: any) {
   const loans: LoanItem[] = (payload.data.loans ?? []).map(normalizeLoan);
   const requests: RequestItem[] = (payload.data.requests ?? []).map(normalizeRequest);
   const purchaseRequests: PurchaseRequestItem[] = (payload.data.purchase_requests ?? []).map(normalizePurchaseRequest);
@@ -295,7 +295,7 @@ function buildAccountResult(payload: any) {
   };
 }
 
-function buildFallbackResult(toolResult: any, parsedPayload: any) {
+export function buildFallbackResult(toolResult: any, parsedPayload: any) {
   const rawPreview = JSON.stringify(parsedPayload ?? toolResult ?? {}).slice(0, 1000);
   return {
     content: [
@@ -314,12 +314,12 @@ function buildFallbackResult(toolResult: any, parsedPayload: any) {
   };
 }
 
-function buildErrorResult(message: string) {
+export function buildErrorResult(message: string) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
 }
 
 /** 授權過期／未授權時的專用回覆：明確指引模型接著呼叫 reauth。 */
-function buildAuthRequiredResult() {
+export function buildAuthRequiredResult() {
   return {
     content: [
       {
@@ -336,7 +336,7 @@ function buildAuthRequiredResult() {
 
 /** 依實際 payload 形狀判斷是 catalog 還是 account dashboard，viewType 缺失時用形狀推斷。
  *  catalog 的 data 是陣列本身（不是 { items: [...] }），account dashboard 才是帶 loans/requests 的物件。 */
-function routePayload(payload: any, max: number) {
+export function routePayload(payload: any, max: number) {
   if (!payload) return null;
 
   if (payload.viewType === "catalog" || Array.isArray(payload.data)) {
