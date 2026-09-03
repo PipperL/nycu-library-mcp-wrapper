@@ -335,7 +335,12 @@ export function buildAuthRequiredResult() {
 }
 
 /** 依實際 payload 形狀判斷是 catalog 還是 account dashboard，viewType 缺失時用形狀推斷。
- *  catalog 的 data 是陣列本身（不是 { items: [...] }），account dashboard 才是帶 loans/requests 的物件。 */
+ *  catalog 的 data 是陣列本身（不是 { items: [...] }），account dashboard 才是帶 loans/requests 的物件。
+ *
+ *  upstream 實際回傳的 account dashboard payload，viewType 欄位的值是 "dashboard"，
+ *  不是原本以為（也是這個 wrapper 自己 structuredContent.viewType 對外用的）"account_dashboard"——
+ *  兩者容易搞混。這裡兩個字串都接受，靠後面的形狀推斷當保險，避免 upstream 未來又換一種
+ *  拼法時，這個明確比對分支又悄悄變成永遠不會命中的死碼（先前只靠形狀推斷硬撐，沒被發現）。 */
 export function routePayload(payload: any, max: number) {
   if (!payload) return null;
 
@@ -343,6 +348,7 @@ export function routePayload(payload: any, max: number) {
     return buildCatalogResult(payload, max);
   }
   if (
+    payload.viewType === "dashboard" ||
     payload.viewType === "account_dashboard" ||
     Array.isArray(payload.data?.loans) ||
     Array.isArray(payload.data?.requests) ||
@@ -365,9 +371,11 @@ export function routePayload(payload: any, max: number) {
 // 跳出確認框；openWorldHint 依使用者決定全部設為 false。
 // ---------------------------------------------------------------------------
 
-function buildServer(env: Env, baseUrl: string) {
-  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
-
+/** 四個工具的實際處理邏輯，抽成獨立函式（不依賴 McpServer 實例本身）。
+ *  這樣測試可以直接呼叫這些函式、餵假的 env／baseUrl，不需要真的架一個
+ *  MCP client-server 連線或動 upstream 網路——純粹是為了可測試性的抽取，
+ *  邏輯本身跟抽取前完全一致。 */
+export function createToolHandlers(env: Env, baseUrl: string) {
   function getGrantIdOrThrow(): string {
     const auth: any = getMcpAuthContext();
     const grantId = auth?.props?.grantId;
@@ -384,6 +392,125 @@ function buildServer(env: Env, baseUrl: string) {
     const { access_token } = JSON.parse(tokenRecord);
     return { grantId, accessToken: access_token };
   }
+
+  async function search({ query, resource_type, search_by, access, scope, sort, offset, max }: any) {
+    let accessToken: string;
+    try {
+      ({ accessToken } = await getAccessTokenOrThrow());
+    } catch (e: any) {
+      if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+      return buildErrorResult(e.message);
+    }
+
+    const args = {
+      query,
+      resource_type: resource_type ?? "all",
+      search_by: search_by ?? "title",
+      access: access ?? "all",
+      scope: scope ?? "nycu",
+      sort: sort ?? "rank",
+      offset: offset ?? 0,
+    };
+
+    let toolResult: any;
+    try {
+      toolResult = await callUpstreamTool(accessToken, "search", args);
+    } catch (e: any) {
+      if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+      return buildErrorResult(e.message);
+    }
+
+    const payload = extractPayload(toolResult);
+    const routed = routePayload(payload, max ?? 5);
+    return routed ?? buildFallbackResult(toolResult, payload);
+  }
+
+  // fetch：借閱紀錄 / 預約 / 採購申請儀表板。無參數（身分從 token 解析）。
+  async function fetchAccount() {
+    let accessToken: string;
+    try {
+      ({ accessToken } = await getAccessTokenOrThrow());
+    } catch (e: any) {
+      if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+      return buildErrorResult(e.message);
+    }
+
+    let toolResult: any;
+    try {
+      toolResult = await callUpstreamTool(accessToken, "fetch", {});
+    } catch (e: any) {
+      if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
+      return buildErrorResult(e.message);
+    }
+
+    const payload = extractPayload(toolResult);
+    const routed = routePayload(payload, 5);
+    return routed ?? buildFallbackResult(toolResult, payload);
+  }
+
+  // reauth：授權過期時呼叫，回傳一次性、10 分鐘內有效的重新登入連結。
+  // baseUrl 是這次請求實際打進來的網址（本機測試就是 localhost，正式環境就是正式網址）。
+  async function reauth() {
+    let grantId: string;
+    try {
+      grantId = getGrantIdOrThrow();
+    } catch {
+      return buildErrorResult(
+        "目前沒有偵測到任何授權狀態，請透過原本的 MCP 連線設定流程完成一次初始授權。"
+      );
+    }
+
+    const nonce = crypto.randomUUID();
+    await env.OAUTH_KV.put(
+      `reauth_nonce:${nonce}`,
+      JSON.stringify({ grantId }),
+      { expirationTtl: REAUTH_NONCE_TTL_SECONDS }
+    );
+
+    const reauthUrl = `${baseUrl}/reauth/${nonce}`;
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `請在瀏覽器中打開以下連結，重新登入 NYCU 帳號完成授權：\n\n` +
+            `[點此重新登入](${reauthUrl})\n\n` +
+            `此連結 10 分鐘內有效，且只能使用一次。登入完成後，回到這裡重新送出剛才的查詢即可。`,
+        },
+      ],
+    };
+  }
+
+  // remove_auth：手動清除目前快取的 NYCU token。
+  async function removeAuth() {
+    let grantId: string;
+    try {
+      grantId = getGrantIdOrThrow();
+    } catch {
+      return buildErrorResult("目前沒有偵測到任何授權狀態，無需移除。");
+    }
+
+    await env.OAUTH_KV.delete(`nycu_token:${grantId}`);
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            "已移除目前快取的 NYCU 授權。下次查詢會提示需要重新登入；" +
+            "也可以直接呼叫 reauth 立即取得重新登入連結。",
+        },
+      ],
+    };
+  }
+
+  return { search, fetch: fetchAccount, reauth, remove_auth: removeAuth };
+}
+
+function buildServer(env: Env, baseUrl: string) {
+  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
+  const handlers = createToolHandlers(env, baseUrl);
 
   server.registerTool(
     "search",
@@ -406,40 +533,9 @@ function buildServer(env: Env, baseUrl: string) {
         openWorldHint: false,
       },
     },
-    async ({ query, resource_type, search_by, access, scope, sort, offset, max }) => {
-      let accessToken: string;
-      try {
-        ({ accessToken } = await getAccessTokenOrThrow());
-      } catch (e: any) {
-        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
-        return buildErrorResult(e.message);
-      }
-
-      const args = {
-        query,
-        resource_type: resource_type ?? "all",
-        search_by: search_by ?? "title",
-        access: access ?? "all",
-        scope: scope ?? "nycu",
-        sort: sort ?? "rank",
-        offset: offset ?? 0,
-      };
-
-      let toolResult: any;
-      try {
-        toolResult = await callUpstreamTool(accessToken, "search", args);
-      } catch (e: any) {
-        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
-        return buildErrorResult(e.message);
-      }
-
-      const payload = extractPayload(toolResult);
-      const routed = routePayload(payload, max ?? 5);
-      return routed ?? buildFallbackResult(toolResult, payload);
-    }
+    handlers.search
   );
 
-  // fetch：借閱紀錄 / 預約 / 採購申請儀表板。無參數（身分從 token 解析）。
   server.registerTool(
     "fetch",
     {
@@ -451,31 +547,9 @@ function buildServer(env: Env, baseUrl: string) {
         openWorldHint: false,
       },
     },
-    async () => {
-      let accessToken: string;
-      try {
-        ({ accessToken } = await getAccessTokenOrThrow());
-      } catch (e: any) {
-        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
-        return buildErrorResult(e.message);
-      }
-
-      let toolResult: any;
-      try {
-        toolResult = await callUpstreamTool(accessToken, "fetch", {});
-      } catch (e: any) {
-        if (e instanceof AuthRequiredError) return buildAuthRequiredResult();
-        return buildErrorResult(e.message);
-      }
-
-      const payload = extractPayload(toolResult);
-      const routed = routePayload(payload, 5);
-      return routed ?? buildFallbackResult(toolResult, payload);
-    }
+    handlers.fetch
   );
 
-  // reauth：授權過期時呼叫，回傳一次性、10 分鐘內有效的重新登入連結。
-  // baseUrl 是這次請求實際打進來的網址（本機測試就是 localhost，正式環境就是正式網址）。
   server.registerTool(
     "reauth",
     {
@@ -487,40 +561,9 @@ function buildServer(env: Env, baseUrl: string) {
         openWorldHint: false,
       },
     },
-    async () => {
-      let grantId: string;
-      try {
-        grantId = getGrantIdOrThrow();
-      } catch {
-        return buildErrorResult(
-          "目前沒有偵測到任何授權狀態，請透過原本的 MCP 連線設定流程完成一次初始授權。"
-        );
-      }
-
-      const nonce = crypto.randomUUID();
-      await env.OAUTH_KV.put(
-        `reauth_nonce:${nonce}`,
-        JSON.stringify({ grantId }),
-        { expirationTtl: REAUTH_NONCE_TTL_SECONDS }
-      );
-
-      const reauthUrl = `${baseUrl}/reauth/${nonce}`;
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text:
-              `請在瀏覽器中打開以下連結，重新登入 NYCU 帳號完成授權：\n\n` +
-              `[點此重新登入](${reauthUrl})\n\n` +
-              `此連結 10 分鐘內有效，且只能使用一次。登入完成後，回到這裡重新送出剛才的查詢即可。`,
-          },
-        ],
-      };
-    }
+    handlers.reauth
   );
 
-  // remove_auth：手動清除目前快取的 NYCU token。
   server.registerTool(
     "remove_auth",
     {
@@ -532,27 +575,7 @@ function buildServer(env: Env, baseUrl: string) {
         openWorldHint: false,
       },
     },
-    async () => {
-      let grantId: string;
-      try {
-        grantId = getGrantIdOrThrow();
-      } catch {
-        return buildErrorResult("目前沒有偵測到任何授權狀態，無需移除。");
-      }
-
-      await env.OAUTH_KV.delete(`nycu_token:${grantId}`);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text:
-              "已移除目前快取的 NYCU 授權。下次查詢會提示需要重新登入；" +
-              "也可以直接呼叫 reauth 立即取得重新登入連結。",
-          },
-        ],
-      };
-    }
+    handlers.remove_auth
   );
 
   return server;
