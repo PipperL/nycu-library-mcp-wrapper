@@ -114,6 +114,7 @@ Wraps the upstream catalog search tool. Annotations: `readOnlyHint: true`, `dest
 | `query` | string | Search terms (title, author, keyword). |
 | `offset` | integer, optional | Pagination offset into the result set. |
 | `resource_type` | string, optional | Filter by resource type (e.g. book, journal, thesis) as exposed by upstream. |
+| `search_by` | string, optional | Which field to search against (e.g. title, author, keyword) as exposed by upstream. Defaults to `"title"`. |
 | `access` | string, optional | Filter by access type (e.g. physical, electronic) as exposed by upstream. |
 | `scope` | string, optional | Search scope as exposed by upstream (e.g. catalog-wide vs. a specific collection). |
 | `sort` | string, optional | Sort order as exposed by upstream. |
