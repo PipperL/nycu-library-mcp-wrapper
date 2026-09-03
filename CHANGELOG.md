@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-03
+
+以「補齊測試」為主軸的一個版本：專案原本完全沒有真正在跑的自動化測試，這次補上會實際執行的測試套件、接上 CI，順便修掉寫測試過程中發現的一個真實 bug（`fetch` 的 `viewType` 判斷）。沒有任何工具的對外行為改變。
+
+### Added
+
+- 補上完整的 Vitest + `@cloudflare/vitest-pool-workers` 測試套件（`test/`），取代先前專案模板留下、內容跟這個 worker 完全無關的空殼測試：
+  - `test/mcp-server.spec.ts`：27 個純函式測試（catalog／loan／request／purchase request 正規化、payload 路由判斷、catalog／account 結果組裝）。
+  - `test/tool-handlers.spec.ts`：`search`／`fetch`／`reauth`／`remove_auth` 四個工具本身邏輯的測試（未登入、token 過期、上游 401、成功路徑），用真實 upstream 回應（已去識別化）當 fixture。為了讓這四個工具可以脫離完整 MCP 協定直接呼叫測試，`src/mcp-server.ts` 新增匯出 `createToolHandlers(env, baseUrl)`。
+  - `test/index.spec.ts`：`auth-handler.ts` 路由測試，涵蓋 `/callback`／`/reauth/:nonce` 的錯誤路徑，以及 `mode: "initial"`／`mode: "reauth"` 兩種成功路徑（`mode: "initial"` 真的走過 DCR 註冊、`/authorize`、`completeAuthorization`，只有 NYCU 端的 token 交換被假造）。
+- 新增 GitHub Actions CI（`.github/workflows/test.yml`）：每次 push／PR 到 main 都會跑 typecheck 跟完整測試套件。
+
+### Fixed
+
+- 修正 `fetch` 工具的帳戶儀表板路由判斷：upstream 實際回傳的 `viewType` 值是 `"dashboard"`，不是原本以為（也是這個 wrapper 自己對外 `structuredContent.viewType` 使用的）`"account_dashboard"`——這個明確比對分支先前一直是死碼，靠後面的資料形狀推斷在撐著，寫測試時才發現。現在兩個字串都接受。
+- `vitest.config.mts` 改用 `@cloudflare/vitest-pool-workers` v4 的 `cloudflareTest` plugin API（原本用的 `defineWorkersConfig`／`/config` 路徑已在目前安裝的版本移除，導致測試根本跑不起來）。
+- 套用 `npm audit fix`，修掉 `fast-uri`（透過 `ajv`）跟 `qs`（透過 `express`）兩個透過 `@modelcontextprotocol/sdk` 引入的間接依賴漏洞。
+
+### Changed
+
+- `SPEC.md` 同步更新：`search` 的 `search_by` 參數補進 §5.1 參數表（程式碼從 1.5.0 就支援，先前漏記文件）；§6／§9 修正 `viewType` 的正確值；§9 新增測試套件涵蓋範圍說明；註明 `loans`／catalog 正規化已用真實 2026-09 資料驗證過，`requests`／`purchase_requests` 仍待驗證。
+
 ## [1.5.0] - 2026-08-24
 
 以「跟上 upstream 協定改版」為起點，延伸出一整套重新授權體驗改善的版本。不破壞任何既有 MCP 工具呼叫方式，但如果你 fork 過本專案的原始碼，請看最下方「⚠️ 給 fork 過程式碼的人」。
@@ -47,5 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 2. **`server.tool()` → `server.registerTool()`**：自己加過工具的話，需要照新的 config-object 簽名改寫。
 3. **`auth-handler.ts` 也要同步更新**：只換 `mcp-server.ts` 不夠——`reauth` 工具依賴 `auth-handler.ts` 裡新增的 `/reauth/:nonce` 路由跟 `/callback` 的 `mode` 分流邏輯，缺一不可。
 
-[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/releases/tag/v1.5.0

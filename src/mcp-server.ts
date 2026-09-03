@@ -227,7 +227,7 @@ async function callUpstreamTool(
     authProvider: { token: async () => accessToken },
   });
 
-  const client = new Client({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
+  const client = new Client({ name: "nycu-library-mcp-wrapper", version: "1.6.0" });
 
   try {
     await client.connect(transport);
@@ -509,7 +509,7 @@ export function createToolHandlers(env: Env, baseUrl: string) {
 }
 
 function buildServer(env: Env, baseUrl: string) {
-  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.5.0" });
+  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.6.0" });
   const handlers = createToolHandlers(env, baseUrl);
 
   server.registerTool(
