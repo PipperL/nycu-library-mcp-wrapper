@@ -167,7 +167,7 @@ Design rule: **`content` must never degrade to a bare summary line.** This is th
 
 For `search`, `content` renders each result as a short block: title, author(s), resource type, per-campus/per-branch availability, call number, and a permalink if the upstream provided one — up to the `max` parameter (default 5). The upstream's actual payload shape is `{ data: [...], viewType: "catalog" }` — `data` is the array of items directly, not `{ items: [...] }` — and does not currently include a `has_more` flag; the wrapper derives `hasMore` by comparing the full item count against how many are rendered.
 
-For `fetch`, `content` renders each loan/hold/purchase-request as a line with title, due date or status, and pickup location where applicable. The upstream payload shape here is `{ data: { loans: [...], requests: [...], purchase_requests: [...] }, viewType: "account_dashboard" }`.
+For `fetch`, `content` renders each loan/hold/purchase-request as a line with title, due date or status, and pickup location where applicable. The upstream payload shape here is `{ data: { loans: [...], requests: [...], purchase_requests: [...] }, viewType: "dashboard" }` — note the upstream's own `viewType` value is `"dashboard"`, not `"account_dashboard"` (that string is this wrapper's own `structuredContent.viewType`, a separate, unrelated contract — see §6's response shape above). `routePayload` accepts either string, falling back to shape-inference (`data.loans`/`data.requests`/`data.purchase_requests` being arrays) either way, so this naming mismatch was never actually load-bearing — verified in 2026-09 against a real account's `fetch` response.
 
 There are two distinct error shapes, both returned with `isError: true` rather than a raw HTTP error, so they render sensibly in chat:
 - **Generic errors** (`buildErrorResult`) — any failure that isn't specifically about missing/expired NYCU authorization (e.g. an unexpected upstream error).
@@ -201,12 +201,12 @@ When a tool call finds an expired or missing NYCU token, `search`/`fetch` return
 
 ## 9. Known Limitations
 
-- No automated test suite; correctness has been validated manually via [MCP Inspector](https://github.com/modelcontextprotocol/inspector) against both the local dev server and the deployed Worker.
+- Automated test suite via Vitest + `@cloudflare/vitest-pool-workers` (see `test/`), covering the normalization/routing pure functions, the four MCP tools (`search`/`fetch`/`reauth`/`remove_auth`), and `auth-handler.ts`'s routes; CI runs it on every push/PR. Manual verification via [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is still the way to exercise the real OAuth handshake end-to-end, which the automated suite mocks out.
 - `fetch_account_page` is not exposed (see §4).
-- The response-normalization logic is written specifically against the current shape of NYCU Library's `viewType: "catalog"` and `viewType: "account_dashboard"` payloads; if NYCU changes their upstream schema, the normalizer will need corresponding updates.
+- The response-normalization logic is written specifically against the current shape of NYCU Library's `viewType: "catalog"` and `viewType: "dashboard"` payloads; if NYCU changes their upstream schema, the normalizer will need corresponding updates.
 - No refresh-token support is possible on this wrapper's side, since NYCU's authorization server does not issue refresh tokens for this service. The `reauth` flow (§3.3) makes re-authenticating a one-click action, but the underlying ~3-day expiry cannot be eliminated.
 - Tool annotations (§5) are advisory only; whether a given MCP client actually uses them to skip confirmation prompts is outside this wrapper's control.
-- `fetch`'s `requests` (holds) and `purchase_requests` normalization has been validated less thoroughly than `loans`, since real test accounts used during development had no active holds or purchase requests at the time of writing. Field-name assumptions there (`pickup_location`, `expiry_date`, `created_at`, etc.) should be treated as provisional until confirmed against real data.
+- `fetch`'s `loans` normalization (and `search`'s catalog normalization) has been confirmed against a real account's response as of 2026-09. `requests` (holds) and `purchase_requests` normalization is still validated less thoroughly, since no test account used during development has had an active hold or purchase request. Field-name assumptions there (`pickup_location`, `expiry_date`, `created_at`, etc.) should be treated as provisional until confirmed against real data.
 - Deployment and connection instructions are written with Open WebUI as the primary worked example; other MCP clients are expected to work via the same standard protocol, but haven't all been individually verified.
 
 ## 10. Compliance Notes
