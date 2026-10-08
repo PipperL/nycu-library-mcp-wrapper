@@ -65,9 +65,9 @@ mcp.lib.nycu.edu.tw
 ## 已知限制
 
 - **NYCU access token 每約 3 天過期，且沒有 refresh token。** 這是校方刻意的安全政策，不是 bug。過期時 `search`／`fetch` 會回傳明確指引，告訴模型呼叫 `reauth` 取得一次性重新登入連結——你點開連結、完成 NYCU 登入即可，不需要重新設定整個 MCP 連線。
-- 上游的 `fetch_account_page` 工具**刻意不包裝**——它自己的說明就寫明是內部分頁輔助工具，「不建議給模型使用」。
+- 目前只包裝上游的 `search`／`fetch`。上游近期新增的論文與期刊類工具（`search_academic_papers`、`journal_search` 等）尚未包裝，打算等上游全部完成並正式公告後再跟進（見 [SPEC.md §4](./SPEC.md#4-security-model)）。
 - Tool annotations（`readOnlyHint` 等）只是建議性質，實際上會不會影響某個 client 跳確認框的行為，取決於該 client 自己的實作，本專案無法保證。
-- 目前沒有自動化測試，是透過 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) 手動驗證的。`fetch` 裡「預約中」跟「採購申請」的欄位正規化，因為測試帳號目前沒有實際資料，驗證程度不如「借閱中」完整。
+- 有 Vitest 自動化測試（`npm test`），GitHub Actions CI 會在每次 push／PR 時執行。`fetch` 裡「預約中」跟「採購申請」的欄位依上游自己的工具說明與 UI 程式碼對應，但開發用的帳號目前沒有這兩類紀錄，還沒用真實資料驗證過。
 - 部署與連線步驟以 Open WebUI 為範例撰寫（見 [INSTALL.md](./INSTALL.md)），若使用其他支援 MCP 的 client，OAuth 授權與工具呼叫的核心邏輯相同，但連線設定畫面會不同，請參考該 client 自己的 MCP 連線文件。
 
 ## 安全性說明
@@ -155,9 +155,9 @@ See [SPEC.md](./SPEC.md) for the full technical design, upstream response schema
 ## Known Limitations
 
 - **NYCU Library access tokens expire every ~3 days with no refresh token.** This is a deliberate security policy on NYCU's side, not a bug. When it happens, `search`/`fetch` instruct the model to call `reauth`, which returns a one-time link — open it, log in, and you're done, no need to redo the whole MCP connection setup.
-- `fetch_account_page` (an upstream tool) is intentionally **not** wrapped — its own description marks it as an internal pagination helper "not intended for model use."
+- Only the upstream's `search`/`fetch` are wrapped. The upstream's recently added paper and journal tools (`search_academic_papers`, `journal_search`, etc.) are not wrapped yet; the plan is to follow up once the upstream has finished and officially announced them (see [SPEC.md §4](./SPEC.md#4-security-model)).
 - Tool annotations (`readOnlyHint`, etc.) are advisory only; whether a given client actually skips confirmation prompts based on them is outside this project's control.
-- No automated tests yet; validated manually via [MCP Inspector](https://github.com/modelcontextprotocol/inspector). Normalization of `fetch`'s "holds" and "purchase requests" sections has been validated less thoroughly than "loans," since the test account used during development had no active data in those categories.
+- Covered by an automated Vitest suite (`npm test`), run by GitHub Actions CI on every push/PR. `fetch`'s "holds" and "purchase requests" field mapping follows the upstream's own tool description and UI code, but hasn't been checked against real records yet, since the account used during development has none in those categories.
 - Deployment/connection steps are written against Open WebUI as the example (see [INSTALL.md](./INSTALL.md)). The core OAuth and tool-call logic is client-agnostic; connection UI will differ for other MCP clients — consult that client's own MCP connection docs.
 
 ## Security Notes

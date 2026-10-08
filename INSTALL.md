@@ -132,7 +132,7 @@ npx wrangler kv key delete "nycu_dcr_client_id" --namespace-id=<你的KV id> --r
 
 點 **Register Client**，應該會顯示 `Registered`（這是 Open WebUI 對你的 Worker 做 DCR，跟第 4 步 Worker 對陽明交大做的 DCR 是不同層）。存檔後在對話裡觸發一次工具呼叫，會被提示用 NYCU SSO 帳號登入一次。
 
-**其他 MCP client**（例如 Claude、ChatGPT 的自訂連結器功能）：概念完全一樣——填入同一個 `https://<你的 worker>.workers.dev/mcp` URL、選擇 OAuth 2.1 認證方式，該 client 會自動走 DCR + PKCE 流程並跳出 NYCU 登入頁。具體設定畫面請參考該 client 自己的說明文件，因為每家介面不同，但底層協定完全相容。
+**其他 MCP client**（例如 Claude、ChatGPT 的自訂連結器功能）：概念完全一樣——填入同一個 `https://<你的 worker>.workers.dev/mcp` URL、選擇 OAuth 2.1 認證方式，該 client 會自動走 DCR + PKCE 流程並跳出 NYCU 登入頁。具體設定畫面請參考該 client 自己的說明文件，因為每家介面不同，但底層協定完全相容。2026-10-08 已確認透過 claude.ai 的自訂連接器（connector）接上這個 Worker 可以正常使用 `search`／`fetch`；ChatGPT 尚未實測。
 
 ## 8. 部署後整理（非必要）
 
@@ -141,7 +141,7 @@ npx wrangler kv key delete "nycu_dcr_client_id" --namespace-id=<你的KV id> --r
 npx wrangler kv key list --namespace-id=<你的KV id> --remote
 npx wrangler kv key delete "<過期的key>" --namespace-id=<你的KV id> --remote
 ```
-這不是必須的動作——殘留的 key（舊的 `nycu_token:*`、`pkce:*`、`reauth_nonce:*`）不會造成任何衝突，設過 TTL 的會自動過期，token 本身也會在約 3 天後自然失效。
+這不是必須的動作——殘留的 key（舊的 `nycu_token:*`、`pkce:*`、`reauth_nonce:*`）不會造成任何衝突。`pkce:*`／`reauth_nonce:*` 有 10 分鐘 TTL；`nycu_token:*` 從 v1.6.1 起帶 3 天 TTL（跟 NYCU token 的有效期一致），v1.6.1 之前寫入的則沒有 TTL，會一直留著直到手動刪除，不過裡面的 token 本身在約 3 天後就已經失效。
 
 ---
 
@@ -304,7 +304,7 @@ The example below uses **Open WebUI**. In principle, the setup logic is the same
 
 Click **Register Client** — it should show `Registered` (this is Open WebUI performing DCR against your Worker, separate from the Worker↔NYCU DCR in step 4). Save, then trigger a tool call from a chat — you'll be prompted to log in with your NYCU SSO account once.
 
-**Other MCP clients** (e.g. Claude's or ChatGPT's custom connector features): the concept is identical — enter the same `https://<your-worker>.workers.dev/mcp` URL, choose OAuth 2.1 authentication, and the client will automatically perform DCR + PKCE and prompt the NYCU login page. Refer to that client's own documentation for the exact settings screen, since UIs differ, but the underlying protocol is fully compatible.
+**Other MCP clients** (e.g. Claude's or ChatGPT's custom connector features): the concept is identical — enter the same `https://<your-worker>.workers.dev/mcp` URL, choose OAuth 2.1 authentication, and the client will automatically perform DCR + PKCE and prompt the NYCU login page. Refer to that client's own documentation for the exact settings screen, since UIs differ, but the underlying protocol is fully compatible. As of 2026-10-08, connecting this Worker as a claude.ai custom connector has been confirmed to work for `search`/`fetch`; ChatGPT hasn't been tested yet.
 
 ## 8. Post-deploy hygiene (optional)
 
@@ -313,7 +313,7 @@ Clean up test data accumulated during local development:
 npx wrangler kv key list --namespace-id=<your-kv-id> --remote
 npx wrangler kv key delete "<stale-key>" --namespace-id=<your-kv-id> --remote
 ```
-This is not required for correct operation — leftover keys (old `nycu_token:*`, `pkce:*`, `reauth_nonce:*`) don't conflict with anything and expire on their own (all of them carry TTLs), or simply go stale (tokens become invalid after ~3 days regardless).
+This is not required for correct operation — leftover keys (old `nycu_token:*`, `pkce:*`, `reauth_nonce:*`) don't conflict with anything. `pkce:*`/`reauth_nonce:*` carry a 10-minute TTL; `nycu_token:*` carries a 3-day TTL (matching the NYCU token's lifetime) since v1.6.1, while entries written by earlier versions have no TTL and stay until deleted manually — though the token inside is invalid after ~3 days regardless.
 
 ---
 
