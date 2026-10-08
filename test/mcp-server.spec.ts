@@ -93,34 +93,67 @@ describe("normalizeLoan / normalizeRequest / normalizePurchaseRequest", () => {
     });
   });
 
-  it("normalizeRequest 支援 snake_case 與 camelCase 兩種欄位名稱", () => {
-    expect(normalizeRequest({ title: "A", status: "pending", pickup_location: "總圖" })).toEqual({
-      title: "A",
-      status: "pending",
-      pickupLocation: "總圖",
-      expiryDate: "",
-    });
+  // requests / purchase_requests 的欄位依 upstream fetch 工具 description 與 upstream 自己的
+  // dashboard UI 實際讀取的欄位（2026-10-08 確認），帳號目前沒有真實紀錄可錄 fixture。
+  it("normalizeRequest 對應 upstream 的 request_status / request_date / author", () => {
+    expect(
+      normalizeRequest({
+        title: "A",
+        author: "王小明",
+        description: "v.1",
+        request_status: "IN_PROCESS",
+        request_date: "2026-10-01Z",
+        pickup_location: "總圖",
+      })
+    ).toEqual({ title: "A", author: "王小明", status: "IN_PROCESS", pickupLocation: "總圖", requestDate: "2026-10-01Z" });
+  });
+
+  it("normalizeRequest 沒有 request_status 時退回舊的 status / pickupLocation 欄位", () => {
     expect(normalizeRequest({ title: "B", status: "ready", pickupLocation: "分館" })).toEqual({
       title: "B",
+      author: "",
       status: "ready",
       pickupLocation: "分館",
-      expiryDate: "",
+      requestDate: "",
     });
   });
 
-  it("normalizePurchaseRequest 支援 snake_case 與 camelCase 兩種欄位名稱", () => {
-    expect(normalizePurchaseRequest({ title: "C", status: "approved", created_at: "2026-01-01" })).toEqual({
+  it("normalizePurchaseRequest 對應 upstream 的 request_id / request_date / author / isbn", () => {
+    expect(
+      normalizePurchaseRequest({
+        request_id: "PR1",
+        title: "C",
+        author: "李四",
+        isbn: "9789571234567",
+        request_date: "2026-01-01Z",
+        status: "APPROVED",
+        request_status: "ACTIVE",
+      })
+    ).toEqual({
+      requestId: "PR1",
       title: "C",
-      status: "approved",
-      createdAt: "2026-01-01",
-      isbn: "",
-    });
-    expect(normalizePurchaseRequest({ title: "D", status: "review", createdAt: "2026-02-02", isbn: "9789571234567" })).toEqual({
-      title: "D",
-      status: "review",
-      createdAt: "2026-02-02",
+      author: "李四",
       isbn: "9789571234567",
+      status: "APPROVED",
+      requestDate: "2026-01-01Z",
     });
+  });
+
+  it("normalizePurchaseRequest 的 status 可能是 { value, desc } 物件，或缺失時退回 request_status", () => {
+    expect(normalizePurchaseRequest({ title: "D", status: { value: "IN_REVIEW", desc: "In Review" } }).status).toBe("In Review");
+    expect(normalizePurchaseRequest({ title: "E", status: { value: "IN_REVIEW" } }).status).toBe("IN_REVIEW");
+    expect(normalizePurchaseRequest({ title: "F", status: null, request_status: "REJECTED" }).status).toBe("REJECTED");
+    expect(normalizePurchaseRequest({ title: "G", status: "  " , request_status: "ACTIVE" }).status).toBe("ACTIVE");
+  });
+
+  it("normalizePurchaseRequest 沒有 request_date 時退回舊的 created_at / createdAt", () => {
+    expect(normalizePurchaseRequest({ title: "H", created_at: "2026-01-01" }).requestDate).toBe("2026-01-01");
+    expect(normalizePurchaseRequest({ title: "I", createdAt: "2026-02-02" }).requestDate).toBe("2026-02-02");
+  });
+
+  it("normalizeRequest / normalizePurchaseRequest 缺欄位時 fallback 為空字串", () => {
+    expect(normalizeRequest({})).toEqual({ title: "", author: "", status: "", pickupLocation: "", requestDate: "" });
+    expect(normalizePurchaseRequest({})).toEqual({ requestId: "", title: "", author: "", isbn: "", status: "", requestDate: "" });
   });
 });
 
@@ -243,6 +276,17 @@ describe("buildCatalogResult", () => {
   it("對 1.5.0 修過的實際 upstream 形狀（data 直接是陣列）不會拋錯", () => {
     expect(() => buildCatalogResult({ data: [{ title: "X" }] }, 5)).not.toThrow();
   });
+
+  it("館藏狀態標籤：available_in_institution（scope: ust 實際出現的值）不會被標成不可借閱", () => {
+    const text = (status: string) =>
+      buildCatalogResult({ data: [{ title: "X", locations: [{ location: "L", status, callNumber: "C" }] }] }, 5).content[0].text;
+    expect(text("available")).toContain("可借閱");
+    expect(text("unavailable")).toContain("不可借閱");
+    expect(text("available_in_institution")).toContain("他校館藏可借閱");
+    expect(text("available_in_institution")).not.toContain("不可借閱");
+    // 未知的值顯示原字串，不猜
+    expect(text("on_order")).toContain("on_order");
+  });
 });
 
 describe("buildAccountResult", () => {
@@ -262,6 +306,28 @@ describe("buildAccountResult", () => {
     expect(result.structuredContent.normalized_data.loans).toHaveLength(1);
     expect(result.structuredContent.normalized_data.requests).toHaveLength(1);
     expect(result.structuredContent.normalized_data.purchase_requests).toHaveLength(1);
+  });
+
+  it("預約／採購申請用 upstream 實際欄位時，狀態、日期、ISBN 都會出現在 content 跟 model_content", () => {
+    const payload = {
+      viewType: "dashboard",
+      data: {
+        loans: [],
+        requests: [{ title: "預約中的書", author: "作者B", request_status: "IN_PROCESS", request_date: "2026-10-01T00:00:00Z", pickup_location: "總圖" }],
+        purchase_requests: [{ request_id: "PR1", title: "採購申請的書", author: "作者C", isbn: "9789571234567", request_date: "2026-09-01T00:00:00Z", status: { value: "IN_REVIEW", desc: "In Review" } }],
+      },
+    };
+    const result = buildAccountResult(payload);
+    const text = result.content[0].text;
+    expect(text).toContain("IN_PROCESS");
+    expect(text).toContain("總圖");
+    expect(text).toContain("In Review");
+    expect(text).toContain("9789571234567");
+    const model = result.structuredContent.model_content;
+    expect(model).toContain("Status: IN_PROCESS");
+    expect(model).toContain("Requested: 2026-10-01T00:00:00Z");
+    expect(model).toContain("Status: In Review");
+    expect(model).toContain("ISBN: 9789571234567");
   });
 
   it("三個分類都是空陣列時，不拋錯，且不出現該分類的標題", () => {

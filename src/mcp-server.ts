@@ -50,6 +50,14 @@ export function normalizeCatalogItem(raw: any): CatalogItem {
   };
 }
 
+/** upstream locations[].status 的已知值。available_in_institution 出現在 scope: "ust"（台聯大）的結果，
+ *  代表書在聯盟其他學校可借，不是不可借閱。未知的值直接顯示原字串，不要猜。 */
+const AVAILABILITY_LABELS: Record<string, string> = {
+  available: "可借閱",
+  available_in_institution: "他校館藏可借閱",
+  unavailable: "不可借閱",
+};
+
 export function renderCatalogMarkdown(
   items: CatalogItem[],
   total: number,
@@ -70,7 +78,7 @@ export function renderCatalogMarkdown(
     if (it.locations.length) {
       md += `- Locations:\n`;
       it.locations.forEach((loc) => {
-        const availLabel = loc.availability === "available" ? "可借閱" : "不可借閱";
+        const availLabel = AVAILABILITY_LABELS[loc.availability] ?? loc.availability;
         md += `  - ${loc.location}｜${loc.callNumber}｜${availLabel}\n`;
       });
     }
@@ -94,8 +102,10 @@ export function renderCatalogModelContent(items: CatalogItem[], total: number): 
 
 // ---------------------------------------------------------------------------
 // Account dashboard normalize（fetch 工具用：loans / requests / purchase_requests）
-// 欄位名稱依「實際觀察到的 structuredContent」為準（snake_case），
-// 不是照 tool description 裡寫的 camelCase。
+// 欄位名稱依「實際觀察到的 structuredContent」為準（snake_case）。
+// requests / purchase_requests 目前沒有真實資料可驗證，欄位依 upstream fetch 工具的
+// description 跟 upstream 自己的 dashboard UI（ui://widget/dashboard.html）實際讀取的欄位為準
+// （2026-10-08 確認），舊版猜測的欄位名稱保留當 fallback。
 // ---------------------------------------------------------------------------
 
 export interface LoanItem {
@@ -110,16 +120,19 @@ export interface LoanItem {
 
 export interface RequestItem {
   title: string;
+  author: string;
   status: string;
   pickupLocation: string;
-  expiryDate: string;
+  requestDate: string;
 }
 
 export interface PurchaseRequestItem {
+  requestId: string;
   title: string;
-  status: string;
-  createdAt: string;
+  author: string;
   isbn: string;
+  status: string;
+  requestDate: string;
 }
 
 export function normalizeLoan(raw: any): LoanItem {
@@ -134,23 +147,36 @@ export function normalizeLoan(raw: any): LoanItem {
   };
 }
 
+/** upstream 的狀態欄位可能是字串，也可能是 Alma 風格的 { value, desc } 物件（upstream 自己的 UI 兩種都處理）。 */
+function statusText(v: any): string {
+  if (typeof v === "string") return v.trim();
+  if (v && typeof v === "object") return String(v.desc || v.value || "");
+  return "";
+}
+
 export function normalizeRequest(raw: any): RequestItem {
   return {
     title: raw.title ?? "",
-    status: raw.status ?? "",
+    author: raw.author ?? "",
+    status: statusText(raw.request_status) || statusText(raw.status),
     pickupLocation: raw.pickup_location ?? raw.pickupLocation ?? "",
-    expiryDate: raw.expiry_date ?? raw.expiryDate ?? "",
+    requestDate: raw.request_date ?? "",
   };
 }
 
 export function normalizePurchaseRequest(raw: any): PurchaseRequestItem {
   return {
+    requestId: raw.request_id ?? "",
     title: raw.title ?? "",
-    status: raw.status ?? "",
-    createdAt: raw.created_at ?? raw.createdAt ?? "",
+    author: raw.author ?? "",
     isbn: raw.isbn ?? "",
+    // 跟 upstream UI 一樣：status 優先，取不到才用 request_status
+    status: statusText(raw.status) || statusText(raw.request_status),
+    requestDate: raw.request_date ?? raw.created_at ?? raw.createdAt ?? "",
   };
 }
+
+const formatDate = (d: string) => (d ? new Date(d).toLocaleDateString("zh-TW") : "");
 
 export function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[], purchaseRequests: PurchaseRequestItem[]): string {
   let md = `### My Library Account\n\n`;
@@ -159,7 +185,7 @@ export function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[]
   if (loans.length) {
     md += `#### 借閱中\n\n`;
     loans.forEach((l, i) => {
-      const due = l.dueDate ? new Date(l.dueDate).toLocaleDateString("zh-TW") : "";
+      const due = formatDate(l.dueDate);
       md += `${i + 1}. **${l.title}**（${l.author}）\n   - 到期日：${due}${l.loanFine ? `　罰款：${l.loanFine}` : ""}\n`;
     });
     md += `\n`;
@@ -167,14 +193,20 @@ export function renderAccountMarkdown(loans: LoanItem[], requests: RequestItem[]
   if (requests.length) {
     md += `#### 預約中\n\n`;
     requests.forEach((r, i) => {
-      md += `${i + 1}. **${r.title}**（${r.status}）取書地點：${r.pickupLocation}\n`;
+      md += `${i + 1}. **${r.title}**${r.author ? `（${r.author}）` : ""}\n   - 狀態：${r.status || "未知"}`;
+      if (r.pickupLocation) md += `　取書地點：${r.pickupLocation}`;
+      if (r.requestDate) md += `　預約日期：${formatDate(r.requestDate)}`;
+      md += `\n`;
     });
     md += `\n`;
   }
   if (purchaseRequests.length) {
     md += `#### 採購申請\n\n`;
     purchaseRequests.forEach((p, i) => {
-      md += `${i + 1}. **${p.title}**（${p.status}）\n`;
+      md += `${i + 1}. **${p.title}**${p.author ? `（${p.author}）` : ""}\n   - 狀態：${p.status || "未知"}`;
+      if (p.isbn) md += `　ISBN：${p.isbn}`;
+      if (p.requestDate) md += `　申請日期：${formatDate(p.requestDate)}`;
+      md += `\n`;
     });
   }
   return md;
@@ -186,10 +218,10 @@ export function renderAccountModelContent(loans: LoanItem[], requests: RequestIt
     out += `Loan ${i + 1}: ${l.title} | Author: ${l.author} | Due: ${l.dueDate} | Fine: ${l.loanFine || "none"}\n`;
   });
   requests.forEach((r, i) => {
-    out += `Request ${i + 1}: ${r.title} | Status: ${r.status} | Pickup: ${r.pickupLocation}\n`;
+    out += `Request ${i + 1}: ${r.title} | Author: ${r.author} | Status: ${r.status} | Pickup: ${r.pickupLocation} | Requested: ${r.requestDate}\n`;
   });
   purchaseRequests.forEach((p, i) => {
-    out += `PurchaseRequest ${i + 1}: ${p.title} | Status: ${p.status}\n`;
+    out += `PurchaseRequest ${i + 1}: ${p.title} | Author: ${p.author} | ISBN: ${p.isbn} | Status: ${p.status} | Requested: ${p.requestDate}\n`;
   });
   return out;
 }
@@ -227,7 +259,7 @@ async function callUpstreamTool(
     authProvider: { token: async () => accessToken },
   });
 
-  const client = new Client({ name: "nycu-library-mcp-wrapper", version: "1.6.0" });
+  const client = new Client({ name: "nycu-library-mcp-wrapper", version: "1.6.1" });
 
   try {
     await client.connect(transport);
@@ -509,7 +541,7 @@ export function createToolHandlers(env: Env, baseUrl: string) {
 }
 
 function buildServer(env: Env, baseUrl: string) {
-  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.6.0" });
+  const server = new McpServer({ name: "nycu-library-mcp-wrapper", version: "1.6.1" });
   const handlers = createToolHandlers(env, baseUrl);
 
   server.registerTool(
