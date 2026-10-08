@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-08
+
+跟上游（`mcp.lib.nycu.edu.tw`）實際行為重新對齊的一個版本：第一次直接對上游跑 `tools/list`、讀它自己的儀表板 UI 程式碼、逐步實測 OAuth 流程，修正 `fetch` 裡一直沒被驗證過的預約／採購申請欄位，並補上監控上游改版的工具。
+
+### Fixed
+
+- `fetch` 的預約（`requests`）跟採購申請（`purchase_requests`）欄位改成照上游 `fetch` 工具的 description 跟上游自己的 dashboard UI（`ui://widget/dashboard.html`）實際讀取的欄位：
+  - 預約：狀態改讀 `request_status`（原本讀的 `status` 上游沒有），新增 `author`、`request_date`；拿掉上游根本沒有的 `expiry_date`。
+  - 採購申請：日期改讀 `request_date`（原本讀的 `created_at` 上游沒有），新增 `request_id`、`author`；`status` 可能是字串或 `{ value, desc }` 物件，取不到時退回 `request_status`（跟上游 UI 的處理方式相同）。
+  - 舊的猜測欄位名稱保留當 fallback。修正前，使用者一旦有預約或採購申請，狀態跟日期會顯示成空的。
+  - `structuredContent.normalized_data` 裡這兩類的欄位隨之調整：requests 為 `{title, author, status, pickupLocation, requestDate}`，purchase_requests 為 `{requestId, title, author, isbn, status, requestDate}`。
+- `search` 的館藏狀態：`scope: "ust"` 時上游會回 `available_in_institution`（聯盟他校可借），原本會被標成「不可借閱」，現在標成「他校館藏可借閱」；其他沒看過的值直接顯示原字串。
+- `nycu_token:<grantId>` 寫入 KV 時加上 `expirationTtl`（= 上游 token 的 `expires_in`，目前 3 天），跟 SPEC §8 寫的生命週期一致。先前沒設 TTL，過期 token 會一直留在 KV 裡（部署前 KV 裡有 16 筆 `nycu_token`，對應的 grant 只剩 3 個）。舊版寫入的 key 不受影響。
+
+### Added
+
+- `scripts/upstream-snapshot.mjs` 跟基準快照 `upstream/snapshot.json`：擷取上游的協定版本、serverInfo、工具清單跟每個工具的完整定義，跟基準比對，有差異時 exit 1。
+- 測試：預約／採購申請的新欄位與 fallback、`status` 物件形式、館藏狀態標籤、`nycu_token` 的 KV TTL（50 個測試）。
+
+### Changed
+
+- `SPEC.md`：
+  - 新增 §7.1，記錄 2026-10-08 實測的上游 OAuth 行為（DCR、`/declare` 隱私聲明頁、token 格式、401 處理、上游沒有 revoke endpoint）。
+  - 更正協定版本：實測協商結果是 2025-06-18，不是先前寫的 2026-07-28。
+  - 更新上游工具清單：上游現在有 10 個工具，`fetch_account_page` 已經不存在。
+  - 註明 `remove_auth` 只刪 wrapper 自己 KV 裡的 token，上游的 token 在過期前仍然有效。
+
 ## [1.6.0] - 2026-09-03
 
 以「補齊測試」為主軸的一個版本：專案原本完全沒有真正在跑的自動化測試，這次補上會實際執行的測試套件、接上 CI，順便修掉寫測試過程中發現的一個真實 bug（`fetch` 的 `viewType` 判斷）。沒有任何工具的對外行為改變。
@@ -69,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 2. **`server.tool()` → `server.registerTool()`**：自己加過工具的話，需要照新的 config-object 簽名改寫。
 3. **`auth-handler.ts` 也要同步更新**：只換 `mcp-server.ts` 不夠——`reauth` 工具依賴 `auth-handler.ts` 裡新增的 `/reauth/:nonce` 路由跟 `/callback` 的 `mode` 分流邏輯，缺一不可。
 
-[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/releases/tag/v1.5.0

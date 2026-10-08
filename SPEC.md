@@ -28,7 +28,7 @@ This project is an independent, unofficial wrapper. It is not affiliated with, e
 
 - This wrapper does not attempt to add features the upstream server doesn't have (e.g. it does not implement checkout/renewal actions if the upstream API doesn't expose them).
 - It does not attempt to work around the upstream's ~3-day access token lifetime; there is no refresh-token grant offered by NYCU Library's authorization server, so re-authentication is expected and treated as normal behavior, not an error state to suppress.
-- It does not attempt to be a general-purpose OAuth proxy for arbitrary upstream MCP servers — the normalization logic in `mcp-server.ts` is written against this specific upstream's response shapes and against the upstream's current (2026-07-28) protocol revision.
+- It does not attempt to be a general-purpose OAuth proxy for arbitrary upstream MCP servers — the normalization logic in `mcp-server.ts` is written against this specific upstream's response shapes (protocol revision negotiation is left to the official MCP client SDK, see §7).
 
 ## 3. Architecture
 
@@ -45,7 +45,7 @@ Any MCP-compatible AI workspace (Open WebUI / Claude / ChatGPT / etc.)
 │  - response normalizer        │
 └───────────────────────────────┘
         │  OAuth 2.1 (DCR + PKCE)
-        │  MCP over Streamable HTTP (2026-07-28 revision)
+        │  MCP over Streamable HTTP (negotiated by the SDK; 2025-06-18 as of 2026-10-08, see §7)
         ▼
    mcp.lib.nycu.edu.tw
    (NYCU Library's official MCP server)
@@ -73,7 +73,7 @@ Tool calls are served via [`agents/mcp`](https://github.com/cloudflare/agents)'s
 - No Durable Object binding is required in `wrangler.jsonc`.
 - Each request is handled independently by whichever Worker isolate picks it up; the only shared state is what's persisted in KV (tokens, DCR client IDs, OAuth grants, reauth nonces).
 - This keeps the Worker within the free tier (no Durable Object billing) and simplifies reasoning about concurrency.
-- Each upstream tool call opens its own short-lived `Client`/`StreamableHTTPClientTransport` connection and closes it once the call completes — there is no persistent upstream session to manage across requests, which fits naturally with the upstream's 2026-07-28 stateless protocol revision.
+- Each upstream tool call opens its own short-lived `Client`/`StreamableHTTPClientTransport` connection and closes it once the call completes — there is no persistent upstream session to manage across requests, which works regardless of which protocol revision the upstream negotiates (see §7).
 
 ### 3.3 Re-authentication flow
 
@@ -83,7 +83,7 @@ NYCU access tokens expire after ~3 days with no refresh grant (see §8). Rather 
 2. `reauth` generates a random one-time nonce, stores `{ grantId }` under `reauth_nonce:<nonce>` in KV with a 10-minute TTL, and returns a Markdown link to `<worker-origin>/reauth/<nonce>`.
 3. The user opens that link in a browser. `auth-handler.ts` looks up the nonce, deletes it immediately (single-use), and redirects to NYCU's login page via a fresh PKCE flow — tagged internally with `mode: "reauth"` and the original `grantId`.
 4. After the user logs in, `/callback` exchanges the code for a new NYCU token and, because `mode === "reauth"`, writes it back to the **same** `nycu_token:<grantId>` key rather than minting a new downstream grant. The user sees a plain confirmation page and returns to the chat to retry their original query.
-5. `remove_auth` is the inverse operation: it deletes `nycu_token:<grantId>` on demand, for manual logout or when a token is suspected to be stale.
+5. `remove_auth` is the inverse operation: it deletes `nycu_token:<grantId>` on demand, for manual logout or when a token is suspected to be stale. This is a wrapper-local operation only — NYCU's authorization server exposes no revocation endpoint (see §7.1), so the deleted token itself remains valid upstream until its own expiry (at most ~3 days); the wrapper simply stops using it.
 
 This keeps the two OAuth legs cleanly separated: the AI workspace's own session with the Worker is never touched by a NYCU token refresh, and vice versa.
 
@@ -94,7 +94,7 @@ This keeps the two OAuth legs cleanly separated: the AI workspace's own session 
 - **NYCU access tokens are opaque to the downstream AI workspace.** They are stored in Workers KV under a key scoped to the internal `grantId` issued by the Worker's own OAuth provider layer, and are never included in logs, error messages, or tool responses.
 - **Reauth nonces are single-use and short-lived.** Each `reauth_nonce:<nonce>` is deleted the instant it's read by `/reauth/:nonce`, and expires automatically after 10 minutes even if unused, limiting the window in which a leaked link (e.g. shared chat history) could be replayed. The nonce only carries a `grantId` — never a token — so possessing a stale nonce value alone grants no access.
 - **No credential storage.** The Worker never sees or stores the user's NYCU SSO username/password — authentication happens entirely on NYCU's own login page during the OAuth redirect; the Worker only ever receives an authorization code, then an access token.
-- **`fetch_account_page` is intentionally unwrapped.** This upstream tool is a pagination helper whose own description states it is "not intended for model use." Wrapping it would risk exposing an internal implementation detail as if it were a supported public tool.
+- **Only `search` and `fetch` are wrapped.** As of 2026-10-08 the upstream exposes ten tools (see `upstream/snapshot.json`): besides `search`/`fetch`, academic-paper tools (`search_academic_papers`, `search_researchers`, `get_researcher_papers`, `get_paper_details`, `paper_deep_dive`) and journal tools (`journal_search`, `journal_subscribe`, `journal_subscriptions`). These are not wrapped yet. Note `journal_subscribe` is a write operation (`readOnlyHint: false`), so wrapping it needs its own consideration. The `fetch_account_page` pagination helper that earlier versions of this document mentioned (and intentionally left unwrapped) no longer exists upstream.
 - **Tool annotations (`readOnlyHint`, `destructiveHint`, etc., see §5) are advisory hints, not enforcement.** Per the MCP spec, clients must treat them as untrusted unless the server is trusted; whether a given AI workspace actually skips confirmation prompts based on them is entirely up to that client's own implementation.
 - **Blast radius of a leaked Cloudflare API token** is the Worker's own deployment and KV namespace — not NYCU's systems. A leaked Worker-hosted NYCU access token would expose that one user's own library account (their own loans/holds) for up to ~3 days, scoped to whatever the upstream API itself allows.
 - Anyone deploying this for users other than themselves should review NYCU Library's own terms of use for the MCP service (see §10) and this section before doing so.
@@ -140,7 +140,7 @@ Not an upstream tool — implemented entirely by this wrapper. Returns a one-tim
 
 ### 5.4 `remove_auth`
 
-Not an upstream tool — implemented entirely by this wrapper. Deletes the caller's cached NYCU token (`nycu_token:<grantId>`) on demand. Intended for manual logout or when a user suspects their cached token is stale or compromised. Annotations: `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true` (deleting an already-absent key is a no-op), `openWorldHint: false`.
+Not an upstream tool — implemented entirely by this wrapper. Deletes the caller's cached NYCU token (`nycu_token:<grantId>`) from the Worker's KV on demand. It does not (and cannot — see §7.1) revoke the token at NYCU; the token stays valid upstream until it expires, but the wrapper will no longer use it. Intended for manual logout or when a user suspects their cached token is stale or compromised. Annotations: `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: true` (deleting an already-absent key is a no-op), `openWorldHint: false`.
 
 **Input parameters:** none.
 
@@ -167,7 +167,7 @@ Design rule: **`content` must never degrade to a bare summary line.** This is th
 
 For `search`, `content` renders each result as a short block: title, author(s), resource type, per-campus/per-branch availability, call number, and a permalink if the upstream provided one — up to the `max` parameter (default 5). The upstream's actual payload shape is `{ data: [...], viewType: "catalog" }` — `data` is the array of items directly, not `{ items: [...] }` — and does not currently include a `has_more` flag; the wrapper derives `hasMore` by comparing the full item count against how many are rendered.
 
-For `fetch`, `content` renders each loan/hold/purchase-request as a line with title, due date or status, and pickup location where applicable. The upstream payload shape here is `{ data: { loans: [...], requests: [...], purchase_requests: [...] }, viewType: "dashboard" }` — note the upstream's own `viewType` value is `"dashboard"`, not `"account_dashboard"` (that string is this wrapper's own `structuredContent.viewType`, a separate, unrelated contract — see §6's response shape above). `routePayload` accepts either string, falling back to shape-inference (`data.loans`/`data.requests`/`data.purchase_requests` being arrays) either way, so this naming mismatch was never actually load-bearing — verified in 2026-09 against a real account's `fetch` response.
+For `fetch`, `content` renders each loan/hold/purchase-request with title, author, and the relevant status/date fields: due date and fine for loans; `request_status`, pickup location and request date for holds; status, ISBN and request date for purchase requests. Hold and purchase-request field names follow the upstream `fetch` tool's own description and the upstream's own dashboard UI (`ui://widget/dashboard.html`), both checked on 2026-10-08 — holds: `{title, author, description, request_status, request_date, pickup_location}`; purchase requests: `{request_id, title, author, isbn, request_date, status, request_status}`, where `status` may be a plain string or an Alma-style `{ value, desc }` object (the wrapper reads `desc`, then `value`, then falls back to `request_status`, mirroring the upstream UI). Older guessed names (`status`/`pickupLocation` for holds, `created_at`/`createdAt` for purchase requests) are still accepted as fallbacks. Catalog `locations[].status` values seen so far are `available`, `unavailable`, and `available_in_institution` (appears with `scope: "ust"`, i.e. held and available at another university in the alliance); unknown values are shown verbatim. The upstream payload shape here is `{ data: { loans: [...], requests: [...], purchase_requests: [...] }, viewType: "dashboard" }` — note the upstream's own `viewType` value is `"dashboard"`, not `"account_dashboard"` (that string is this wrapper's own `structuredContent.viewType`, a separate, unrelated contract — see §6's response shape above). `routePayload` accepts either string, falling back to shape-inference (`data.loans`/`data.requests`/`data.purchase_requests` being arrays) either way, so this naming mismatch was never actually load-bearing — verified in 2026-09 against a real account's `fetch` response.
 
 There are two distinct error shapes, both returned with `isError: true` rather than a raw HTTP error, so they render sensibly in chat:
 - **Generic errors** (`buildErrorResult`) — any failure that isn't specifically about missing/expired NYCU authorization (e.g. an unexpected upstream error).
@@ -175,14 +175,27 @@ There are two distinct error shapes, both returned with `isError: true` rather t
 
 ## 7. Upstream Transport Details
 
-The upstream (`mcp.lib.nycu.edu.tw`) runs the 2026-07-28 revision of the MCP Streamable HTTP transport. The wrapper talks to it using the official [`@modelcontextprotocol/client`](https://github.com/modelcontextprotocol/typescript-sdk) package (`Client` + `StreamableHTTPClientTransport`), which handles protocol version negotiation, request/response framing, and connection lifecycle internally.
+The upstream (`mcp.lib.nycu.edu.tw`, `serverInfo`: `NYCU Library MCP Server` 1.16.0 as of 2026-10-08) speaks MCP over Streamable HTTP. Earlier versions of this document stated it ran the 2026-07-28 revision; on 2026-10-08, the same `@modelcontextprotocol/client` 2.0.0 the Worker uses (which supports up to 2026-07-28) negotiated **2025-06-18** with it. Whether the upstream changed or the earlier note was inaccurate is unknown — either way the SDK handles negotiation and the wrapper works unchanged. The wrapper talks to it using the official [`@modelcontextprotocol/client`](https://github.com/modelcontextprotocol/typescript-sdk) package (`Client` + `StreamableHTTPClientTransport`), which handles protocol version negotiation, request/response framing, and connection lifecycle internally.
 
 Concretely, `callUpstreamTool()` in `src/mcp-server.ts`:
 - Opens a fresh `StreamableHTTPClientTransport` per tool call, pointed at `UPSTREAM_MCP_URL`, with an `authProvider: { token: async () => accessToken }` supplying the cached NYCU bearer token.
 - Connects a `Client`, calls `client.callTool({ name, arguments })`, and closes the connection in a `finally` block regardless of outcome.
 - Catches `UnauthorizedError` (thrown by the transport when upstream returns 401) and rethrows it as the wrapper's own `AuthRequiredError`, which `search`/`fetch` translate into the auth-required response shape described in §6.
 
-This replaces an earlier implementation (prior to the upstream's 2026-07-28 migration) that manually performed the `initialize` handshake, cached an `Mcp-Session-Id` per grant in KV, and hand-parsed SSE-framed responses. None of that machinery exists anymore — the official client library owns it. If NYCU's upstream server changes protocol revisions again in the future, the fix is almost always an `npm update` of `@modelcontextprotocol/client` rather than a rewrite of transport-handling code in this repo.
+This replaces an earlier implementation (prior to the upstream's 2026-07 protocol migration handled in 1.5.0) that manually performed the `initialize` handshake, cached an `Mcp-Session-Id` per grant in KV, and hand-parsed SSE-framed responses. None of that machinery exists anymore — the official client library owns it. If NYCU's upstream server changes protocol revisions again in the future, the fix is almost always an `npm update` of `@modelcontextprotocol/client` rather than a rewrite of transport-handling code in this repo.
+
+To detect upstream changes, `scripts/upstream-snapshot.mjs` captures the negotiated protocol version, `serverInfo`, capabilities, instructions and every tool's full definition, and diffs it against the committed baseline in `upstream/snapshot.json` (usage in the script header; it needs a one-off NYCU login, kept in a git-ignored `.upstream-oauth.json`).
+
+### 7.1 Upstream OAuth behavior (verified 2026-10-08)
+
+Checked against the live authorization server, comparing what the wrapper sends/expects (`src/auth-handler.ts`) with what the upstream actually does:
+
+- **Metadata** (`/.well-known/oauth-authorization-server`): `authorization_endpoint` `/oauth/authorize`, `token_endpoint` `/oauth/token`, `registration_endpoint` `/oauth/register`, `code_challenge_methods_supported: ["S256"]`, `grant_types_supported: ["authorization_code"]`, `token_endpoint_auth_methods_supported: ["none"]`. No `revocation_endpoint` or `introspection_endpoint`, and none exists at the usual paths (all 404). Protected-resource metadata names `https://mcp.lib.nycu.edu.tw/mcp` as the resource.
+- **Registration (DCR)**: the wrapper's request body (`client_name`, `redirect_uris`, `grant_types: ["authorization_code"]`, `response_types: ["code"]`, `token_endpoint_auth_method: "none"`) is accepted; the response contains `client_id` (no secret), which is all the wrapper reads. The Worker's cached `nycu_dcr_client_id` is still accepted.
+- **Authorization**: `/oauth/authorize` always redirects first to a privacy-notice page (`/declare`, agree via `POST /declare/agree`) and then to NYCU's IdM SSO (`idm.nycu.ust.edu.tw`). The upstream does **not** reject an unknown `client_id`, an unregistered `redirect_uri`, or a missing/`plain` PKCE challenge at this step — all are forwarded to SSO identically — so any parameter validation must happen after login. The wrapper always sends a registered `redirect_uri` and S256 PKCE, so this does not affect it, but it means a bad wrapper config would only surface after the user has logged in. The wrapper does not send the RFC 8707 `resource` parameter; the issued token's `aud` is `https://mcp.lib.nycu.edu.tw/mcp` regardless.
+- **Token exchange**: response is `{ access_token, expires_in: 259200, token_type: "bearer" }` — no `refresh_token`, no `scope`. Invalid, replayed codes and other grant types (`refresh_token`, `client_credentials`) all get `400 {"error":"invalid_grant"}`. The access token is an HS256 JWT with claims `iss`, `aud`, `sub`, `iat`, `exp` (`exp - iat` = 259200 s).
+- **Token validation**: `/mcp` requests with a missing, malformed, or tampered/expired token get `401` with `WWW-Authenticate: Bearer error="invalid_token" … resource_metadata=…`. With the same `authProvider: { token }` setup as `callUpstreamTool()`, the SDK raises `UnauthorizedError` in all of these cases, which the wrapper maps to its auth-required result (§6).
+- **Revocation**: not supported upstream (see above). `remove_auth` is therefore local-only (§5.4).
 
 ## 8. Token & Session Lifecycle
 
@@ -191,7 +204,7 @@ KV is used for several independent purposes, effectively partitioned by key pref
 | Key pattern | Purpose | Lifetime |
 |---|---|---|
 | `nycu_dcr_client_id` | Cached `client_id` from the Worker's own DCR registration against NYCU's authorization server. | Indefinite until manually deleted (e.g. when moving from local dev to production redirect URIs — see INSTALL.md §6). |
-| `nycu_token:<grantId>` | The end user's NYCU access token, scoped to the Worker-issued OAuth grant. | Matches the upstream token's own lifetime, currently **~3 days**, no refresh grant available. Overwritten in place by the `reauth` flow (see §3.3); deleted by `remove_auth`. |
+| `nycu_token:<grantId>` | The end user's NYCU access token, scoped to the Worker-issued OAuth grant. | Matches the upstream token's own lifetime, currently **~3 days**, no refresh grant available: since 1.6.1 the KV entry is written with `expirationTtl` = the token response's `expires_in` (minimum 60 s), so KV drops it when the upstream token expires (entries written by earlier versions have no TTL and stay until overwritten or deleted). Overwritten in place by the `reauth` flow (see §3.3); deleted by `remove_auth`. |
 | `pkce:<stateId>` | Transient state for an in-flight NYCU OAuth handshake (either the initial login or a `reauth` refresh), tagged with `mode: "initial" \| "reauth"`. | 10-minute TTL, auto-expires via KV's native TTL support. |
 | `reauth_nonce:<nonce>` | One-time token binding a `reauth` link back to an existing `grantId`, issued by the `reauth` tool and consumed by `/reauth/:nonce`. | 10-minute TTL; also deleted immediately on first use regardless of TTL. |
 
@@ -202,11 +215,11 @@ When a tool call finds an expired or missing NYCU token, `search`/`fetch` return
 ## 9. Known Limitations
 
 - Automated test suite via Vitest + `@cloudflare/vitest-pool-workers` (see `test/`), covering the normalization/routing pure functions, the four MCP tools (`search`/`fetch`/`reauth`/`remove_auth`), and `auth-handler.ts`'s routes — including the `/callback` success paths for both `mode: "initial"` (real DCR + `/authorize` + `completeAuthorization` against the actual `@cloudflare/workers-oauth-provider` logic, ending in a redirect back to the downstream client with its own code/state) and `mode: "reauth"` (existing grant's token refreshed in place, stale `session:<grantId>` cleared). CI runs the suite on every push/PR. Only the NYCU-side token exchange (`fetch(TOKEN_URL, ...)`) is mocked in these tests; manual verification via [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is still the way to exercise a real NYCU login end-to-end.
-- `fetch_account_page` is not exposed (see §4).
+- The upstream's academic-paper and journal tools are not exposed yet (see §4).
 - The response-normalization logic is written specifically against the current shape of NYCU Library's `viewType: "catalog"` and `viewType: "dashboard"` payloads; if NYCU changes their upstream schema, the normalizer will need corresponding updates.
 - No refresh-token support is possible on this wrapper's side, since NYCU's authorization server does not issue refresh tokens for this service. The `reauth` flow (§3.3) makes re-authenticating a one-click action, but the underlying ~3-day expiry cannot be eliminated.
 - Tool annotations (§5) are advisory only; whether a given MCP client actually uses them to skip confirmation prompts is outside this wrapper's control.
-- `fetch`'s `loans` normalization (and `search`'s catalog normalization) has been confirmed against a real account's response as of 2026-09. `requests` (holds) and `purchase_requests` normalization is still validated less thoroughly, since no test account used during development has had an active hold or purchase request. Field-name assumptions there (`pickup_location`, `expiry_date`, `created_at`, etc.) should be treated as provisional until confirmed against real data.
+- `fetch`'s `loans` normalization (and `search`'s catalog normalization) has been confirmed against a real account's response as of 2026-09. `requests` (holds) and `purchase_requests` normalization has still not been checked against real records, since no account used during development has had an active hold or purchase request. Since 1.6.1 their field names follow the upstream's own tool description and dashboard UI code (§6) instead of guesses, which is much stronger evidence, but should still be confirmed against real data when possible.
 - Deployment and connection instructions are written with Open WebUI as the primary worked example; other MCP clients are expected to work via the same standard protocol, but haven't all been individually verified.
 
 ## 10. Compliance Notes
