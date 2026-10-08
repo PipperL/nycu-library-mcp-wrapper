@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-10-08
+
+只有一項預防性的小改進，沒有對外行為改變。
+
 ### Changed
 
 - 向 NYCU 要授權時帶上 RFC 8707 `resource` 參數（`https://mcp.lib.nycu.edu.tw/mcp`），authorize 導向跟 token exchange 都有帶，符合 MCP 授權規範的要求。upstream 目前不強制要求（不帶也簽出相同 `aud` 的 token），所以沒有行為改變，是預防 upstream 之後開始強制時，初次登入跟 `reauth` 會在使用者登入後才失敗。
@@ -100,7 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 2. **`server.tool()` → `server.registerTool()`**：自己加過工具的話，需要照新的 config-object 簽名改寫。
 3. **`auth-handler.ts` 也要同步更新**：只換 `mcp-server.ts` 不夠——`reauth` 工具依賴 `auth-handler.ts` 裡新增的 `/reauth/:nonce` 路由跟 `/callback` 的 `mode` 分流邏輯，缺一不可。
 
-[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/PipperL/nycu-library-mcp-wrapper/releases/tag/v1.5.0
