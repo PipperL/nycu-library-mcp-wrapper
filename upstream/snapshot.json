@@ -1,0 +1,522 @@
+{
+  "captured_at": "2026-10-08T12:17:44.059Z",
+  "protocolVersion": "2025-06-18",
+  "serverInfo": {
+    "name": "NYCU Library MCP Server",
+    "version": "1.16.0"
+  },
+  "capabilities": {
+    "experimental": {},
+    "prompts": {
+      "listChanged": true
+    },
+    "resources": {
+      "subscribe": false,
+      "listChanged": true
+    },
+    "tools": {
+      "listChanged": true
+    }
+  },
+  "instructions": "NYCU Library MCP Server — library catalog, academic research, and journal tools\nfor National Yang Ming Chiao Tung University (國立陽明交通大學) students.\n\n## Context\n\nNYCU is a member of the University System of Taiwan (UST, 台灣聯合大學系統).\nUST libraries share resources and offer joint borrowing across four universities:\n- National Tsing Hua University (NTHU, 國立清華大學) — Hsinchu\n- National Yang Ming Chiao Tung University (NYCU, 國立陽明交通大學) — Hsinchu & Taipei\n- National Central University (NCU, 國立中央大學) — Taoyuan\n- National Chengchi University (NCCU, 國立政治大學) — Taipei\nWhen students ask about inter-library borrowing or shared resources, this UST network is the relevant context.\n\n## Tool decision rules\n\n### Book / catalog lookup\nIf user wants to find or check a book in the NYCU/UST library → search() (returns UI directly).\nThis catalog is not a recommendation engine. For \"recommend books on X\", suggest titles based on general knowledge, then use search() to check NYCU availability.\n\n### Academic papers\nIf user wants to find papers → search_academic_papers() (returns UI directly).\nFor broad or exploratory requests (e.g. \"what should I read about Y\"), give an overview based on general knowledge; use search_academic_papers() when the user wants specific papers or to check NYCU access.\nIf search results look closely relevant → get_paper_details(paper_ids=[...]) to read their abstracts before responding.\nTo understand a specific paper's references and citing works → paper_deep_dive(paper_id).\n\n### Researchers\nTo find NYCU faculty by name or research topic → search_researchers().\nTo list a researcher's publications → get_researcher_papers(researcher_id) with an ID from search_researchers().\n\n### Journals\nTo find a journal by title → journal_search(query=...).\nTo browse a journal's latest issue → journal_search(issn=...) with an ISSN from a previous result.\n\n### Account\nFor the signed-in user's loans, holds, or purchase requests → fetch().",
+  "tools": [
+    {
+      "name": "fetch",
+      "description": "Fetch the authenticated user's full library dashboard — loans, holds, and purchase requests.\n\nInputs: none (identity resolved from auth token).\n\nOutput — UI widget result (mcp_res_ui):\n  - loans (list): each item has {loan_id, title, author, due_date, loan_date, publication_year, last_renew_date, circ_desk, resource_type, loan_fine}.\n  - requests (list): each item has {title, author, description, request_status, request_date, pickup_location}.\n  - purchase_requests (list): each item has {request_id, title, author, isbn, request_date, status, request_status}.\n  - Missing source values may be null or empty. Dates use the source API format.\n  - total_loans / total_requests / total_purchase_requests (int): real totals from ALMA (may exceed items returned).\n\nTags: read, account, high-latency.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/dashboard.html",
+          "visibility": [
+            "app",
+            "model"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "get_paper_details",
+      "description": "Fetch details for one or more papers by DOI or arXiv ID.\n\nInputs:\n  - paper_ids: list of DOIs or arXiv IDs. Examples: [\"10.18653/v1/2020.acl-main.463\", \"arXiv:2106.15928\"]\n\nTags: read, research.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paper_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "paper_ids"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "get_researcher_papers",
+      "description": "Get a NYCU researcher's full publication list.\n\nUse when: user wants more papers from a specific professor found via search_researchers, or wants to filter a researcher's publications by year.\n\nInputs:\n  - researcher_id (str, required): professor UUID from search_researchers results (the portal_url contains it)\n  - year_min (int|null, optional): filter papers published from this year\n  - year_max (int|null, optional): filter papers published up to this year\n  - limit (int, optional): max papers to return (1-100, default 20)\n\nOutput — list of papers: title, year, DOI, type, subjects.\nTags: read, research.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "researcher_id": {
+            "type": "string"
+          },
+          "year_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "year_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "researcher_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "journal_search",
+      "description": "Search journals or browse a journal's latest issue.\n\nProvide exactly ONE of `query` or `issn` — never both, never neither.\n\nMode 1 — Search (query):\n  Find journals by title keyword. Returns up to 10 matches with title, ISSN, SJR score.\n  Supports OR operator (e.g. \"nature OR cell\"). Prefer full/partial names over acronyms.\n\nMode 2 — Latest issue (issn):\n  Get the latest issue articles for a known journal. Use an ISSN from a previous search result.\n  Returns up to 10 articles per page; use offset to paginate (increment by 10).\n\nInputs:\n  - query (str|null): keyword(s) to search journal titles. Mutually exclusive with issn.\n  - issn (str|null): ISSN from a previous journal_search result. Mutually exclusive with query.\n  - offset (int): pagination for latest-issue mode only. Default 0.\n\nTags: read, journal.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "issn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/dashboard.html",
+          "visibility": [
+            "app",
+            "model"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "journal_subscribe",
+      "description": "Manage journal subscriptions. Use ids from journal_search results.\n\nInputs:\n  - journal_ids: list of numeric journal ids (e.g. [123, 456])\n  - action: \"subscribe\" (default), \"unsubscribe\", or \"check\"\n\nReturns:\n  - subscribe: subscribed_count, journal details, and optionally not_found ids.\n  - unsubscribe: removed_count.\n  - check: subscribed (list of journal ids the student is subscribed to).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "journal_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "action": {
+            "default": "subscribe",
+            "enum": [
+              "subscribe",
+              "unsubscribe",
+              "check"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "journal_ids"
+        ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "journal_subscriptions",
+      "description": "List all journals the current student has subscribed to.\n\nUse when: user asks \"what journals am I following?\" or \"what's new in my subscribed journals?\".\nRenders an interactive UI card listing subscribed journals with their latest issue articles.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/dashboard.html",
+          "visibility": [
+            "app",
+            "model"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "paper_deep_dive",
+      "description": "Deep-dive analysis of a single paper: its metadata, upstream influences (co-cited references), and downstream impact (citing papers and surveys).\n\nUse when: user wants to understand a paper's context — what it builds on, who cites it, and how it fits into the field.\n\nInputs:\n  - paper_id (str, required): a DOI, Semantic Scholar corpus ID, or arXiv ID.\n    Examples: \"10.18653/v1/2020.acl-main.463\", \"268536830\", \"arXiv:2106.15928\"\n\nOutput — dict with:\n  - seed: {corpusid, title, abstract, year, authors}\n  - upstream: list of influential references with {corpusid, title, year, venue, influentialcitationcount, tldr, cocitation_count}\n  - downstream: {papers: [...], surveys: [...]} — citing works with overlap_ref count\n  - summary: {n_cites_kept, weak_coupling, regime}\nTags: read, research, high-latency.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paper_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "paper_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "search",
+      "description": "Search NYCU/Taiwan UST library catalog by keyword.\n\nUse when: user wants to check library holdings, find a specific\nbook, or see what's available on a topic in the NYCU catalog.\nDo NOT use as primary source for book recommendations. For \"recommend books on X\", suggest titles based on general knowledge, then use this tool to check NYCU availability.\n\nInputs:\n- query: keyword or phrase (Chinese/English). Supports AND / OR (uppercase). Prefer one OR query over multiple calls.\n- scope: \"nycu\" | \"ust\". Default \"nycu\". Prefer nycu; fall back to ust only if nycu returns no results.\n\nOutput — list of items:\n- Each item: {type, title, author, year, access, locations, primo_id}.\n\nIf results are empty or poor, retry with variations before giving up:\n- Switch query language (English ↔ Chinese)\n- Change search_by (e.g. \"title\" → \"any\", or try author name)\n- Fall back to scope=\"ust\"\n\nTags: read, catalog, high-latency.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "resource_type": {
+            "default": "all",
+            "enum": [
+              "all",
+              "books",
+              "videos"
+            ],
+            "type": "string"
+          },
+          "search_by": {
+            "default": "title",
+            "enum": [
+              "any",
+              "title",
+              "author"
+            ],
+            "type": "string"
+          },
+          "access": {
+            "default": "all",
+            "enum": [
+              "all",
+              "online",
+              "physical"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "default": "nycu",
+            "enum": [
+              "nycu",
+              "ust"
+            ],
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "sort": {
+            "default": "rank",
+            "enum": [
+              "rank",
+              "date"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/dashboard.html",
+          "visibility": [
+            "app",
+            "model"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "search_academic_papers",
+      "description": "Search academic articles via the global paper index or NYCU Primo.\n\nUse when: user wants research-focused article results instead of general library catalog books/videos.\nDo NOT use as primary source for paper recommendations or topic overviews. When user asks \"recommend papers on X\" or \"what are the key papers on Y\": give an overview based on general knowledge, then use this tool to find/verify specific papers in NYCU.\n\nUse short natural-language keywords; no Boolean/operator syntax. For overview searches, append \"survey\".\n\nInputs:\n  - query (str, required): keyword or phrase\n  - year_start (int|null, optional): filter results published from this year. If provided without year_end, year_end defaults to current year.\n  - year_end (int|null, optional): filter results published up to this year.\n  - scope (enum, optional):\n      scope=\"taiwan\"  →  searches Primo (broader humanities/social sciences coverage).\n                         Use when:  topic is humanities, history,\n                         arts, literature, or social sciences; user wants Taiwan\n                         institution resources or NYCU thesis/ETD.\n      scope=\"global\"  →  searches academic papers with semantic or keyword matching.\n                         Default; use for natural sciences, engineering, CS, medicine.\n  - search_mode (str, optional): search mode for global scope — e.g. \"semantic\", \"keyword\". Default \"keyword\".\n\nOutput — UI widget (viewType \"academic\") with article metadata: title, year, venue, doi, citationCount, primo_id, open_url when available. Fields may be absent or null depending on the source. Taiwan results omit author; global results retain author metadata when supplied by the source.\nTags: read, research, high-latency.\n\nAfter getting results, if closely relevant papers have a DOI or arXiv ID, call get_paper_details(paper_ids=[...]) to read their abstracts before responding. Skip papers without a supported identifier; do not invent one.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "year_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "year_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "scope": {
+            "default": "global",
+            "enum": [
+              "global",
+              "taiwan"
+            ],
+            "type": "string"
+          },
+          "search_mode": {
+            "default": "keyword",
+            "enum": [
+              "semantic",
+              "keyword"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/dashboard.html",
+          "visibility": [
+            "app",
+            "model"
+          ]
+        },
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    },
+    {
+      "name": "search_researchers",
+      "description": "Search NYCU faculty/researchers by name, research topic, or both.\n\nUse when: user wants to find professors, explore who works on a topic, or look up a researcher's recent publications at NYCU.\n\nInputs:\n  - name (str|null, optional): professor name (EN or ZH), substring match (e.g. \"簡仁宗\", \"Chen\")\n  - topic (str|null, optional): research topic keyword, fulltext search on interests and papers (e.g. \"machine learning\")\n  - limit (int, optional): max number of researchers to return (1-10, default 5)\n  At least one of name or topic is required.\n\nOutput — list of researchers, each with: name (EN/ZH), title, ORCID, research interests, portal URL, total matching papers, and up to 5 recent papers (title, year, DOI, subjects).\nTags: read, research.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "limit": {
+            "default": 5,
+            "type": "integer"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    }
+  ],
+  "prompts": [],
+  "resources": [
+    {
+      "name": "dashboard_widget",
+      "uri": "ui://widget/dashboard.html",
+      "description": "Library widget HTML template for account, catalog, academic papers, and journal views",
+      "mimeType": "text/html;profile=mcp-app",
+      "_meta": {
+        "openai/widgetDescription": "NYCU Library widget displaying catalog holdings, account loans and requests, academic papers, journal search results, and latest-issue articles. The view depends on the tool result.",
+        "ui": {
+          "csp": {
+            "connectDomains": [
+              "https://mcp.lib.nycu.edu.tw",
+              "https://api-ap.hosted.exlibrisgroup.com"
+            ],
+            "resourceDomains": [
+              "https://mcp.lib.nycu.edu.tw"
+            ]
+          },
+          "domain": "f4b575a3925d9f06f385e5e8e06b3c8a.claudemcpcontent.com"
+        },
+        "openai/widgetCSP": {
+          "connect_domains": [
+            "https://mcp.lib.nycu.edu.tw",
+            "https://api-ap.hosted.exlibrisgroup.com"
+          ],
+          "resource_domains": [
+            "https://mcp.lib.nycu.edu.tw"
+          ],
+          "redirect_domains": [
+            "https://primo.nycu.edu.tw"
+          ],
+          "script_src": [
+            "unsafe-inline"
+          ],
+          "style_src": [
+            "unsafe-inline"
+          ]
+        },
+        "openai/widgetDomain": "nycu-library",
+        "openai/widgetPrefersBorder": true,
+        "_fastmcp": {
+          "tags": []
+        }
+      }
+    }
+  ],
+  "resourceTemplates": []
+}

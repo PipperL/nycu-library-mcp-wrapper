@@ -26,3 +26,6 @@ build/
 
 # Test coverage
 coverage/
+
+# upstream-snapshot.mjs 的 OAuth 狀態與 token
+.upstream-oauth.json
