@@ -102,6 +102,10 @@ describe("/callback 成功路徑（mode: initial / reauth）", () => {
       "https://mcp.lib.nycu.edu.tw/oauth/token",
       expect.objectContaining({ method: "POST" })
     );
+    // token exchange 也要帶 RFC 8707 resource indicator，跟 authorize 時的值一致
+    const tokenBody = new URLSearchParams(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
+    expect(tokenBody.get("resource")).toBe("https://mcp.lib.nycu.edu.tw/mcp");
+    expect(tokenBody.get("grant_type")).toBe("authorization_code");
     expect(callbackResp.status).toBe(200);
     expect(await callbackResp.text()).toContain("重新授權成功");
 
@@ -216,6 +220,8 @@ describe("/reauth/:nonce", () => {
     expect(location.searchParams.get("client_id")).toBe("test-client-id");
     expect(location.searchParams.get("code_challenge_method")).toBe("S256");
     expect(location.searchParams.get("code_challenge")).toBeTruthy();
+    // RFC 8707 resource indicator（MCP 授權規範要求，見 SPEC §7.1）
+    expect(location.searchParams.get("resource")).toBe("https://mcp.lib.nycu.edu.tw/mcp");
 
     // 單次有效：用過的 nonce 應該已經從 KV 被刪除。
     expect(await env.OAUTH_KV.get("reauth_nonce:test-nonce")).toBeNull();

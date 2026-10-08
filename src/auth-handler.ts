@@ -7,6 +7,10 @@ const ISSUER = "https://mcp.lib.nycu.edu.tw";
 const AUTHORIZE_URL = `${ISSUER}/oauth/authorize`;
 const TOKEN_URL = `${ISSUER}/oauth/token`;
 const REGISTER_URL = `${ISSUER}/oauth/register`;
+/** RFC 8707 resource indicator：MCP 授權規範要求 client 在 authorize 跟 token 請求都帶上目標 MCP server 的網址。
+ *  upstream 目前不帶也照樣簽出 aud 為這個網址的 token（2026-10-08 實測，SPEC §7.1），帶上是為了符合規範，
+ *  避免 upstream 之後開始強制要求時，初次登入跟 reauth 都在使用者登入後才失敗。 */
+const RESOURCE = `${ISSUER}/mcp`;
 
 function base64url(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -95,6 +99,7 @@ async function redirectToNycuLogin(
   target.searchParams.set("state", stateId);
   target.searchParams.set("code_challenge", codeChallenge);
   target.searchParams.set("code_challenge_method", "S256");
+  target.searchParams.set("resource", RESOURCE);
   return Response.redirect(target.toString(), 302);
 }
 
@@ -169,6 +174,7 @@ export default {
           redirect_uri: redirectUri,
           client_id: clientId!,
           code_verifier: codeVerifier,
+          resource: RESOURCE,
         }),
       });
       if (!tokenResp.ok) {

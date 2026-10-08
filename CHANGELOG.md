@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- 向 NYCU 要授權時帶上 RFC 8707 `resource` 參數（`https://mcp.lib.nycu.edu.tw/mcp`），authorize 導向跟 token exchange 都有帶，符合 MCP 授權規範的要求。upstream 目前不強制要求（不帶也簽出相同 `aud` 的 token），所以沒有行為改變，是預防 upstream 之後開始強制時，初次登入跟 `reauth` 會在使用者登入後才失敗。
+
 ## [1.6.1] - 2026-10-08
 
 跟上游（`mcp.lib.nycu.edu.tw`）實際行為重新對齊的一個版本：第一次直接對上游跑 `tools/list`、讀它自己的儀表板 UI 程式碼、逐步實測 OAuth 流程，修正 `fetch` 裡一直沒被驗證過的預約／採購申請欄位，並補上監控上游改版的工具。
