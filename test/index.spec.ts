@@ -15,6 +15,16 @@ async function callWorker(request: Request) {
   return response;
 }
 
+/** nycu_token:<grantId> 的 KV TTL 要跟 upstream token 的 expires_in 一致（SPEC §8），
+ *  不然過期 token 會永遠留在 KV 裡。KV list 回傳的 expiration 是 epoch 秒。 */
+async function expectTokenTtl(key: string, expiresIn: number) {
+  const entry = (await env.OAUTH_KV.list({ prefix: key })).keys.find((k) => k.name === key);
+  expect(entry?.expiration).toBeDefined();
+  const ttl = entry!.expiration! - Math.floor(Date.now() / 1000);
+  expect(ttl).toBeGreaterThan(expiresIn - 60);
+  expect(ttl).toBeLessThanOrEqual(expiresIn);
+}
+
 describe("未知路徑", () => {
   it("回傳 404 Not found（不是模板留下的 Hello World!）", async () => {
     const request = new IncomingRequest("https://example.com/nonexistent");
@@ -100,6 +110,7 @@ describe("/callback 成功路徑（mode: initial / reauth）", () => {
     const tokenRecord = JSON.parse((await env.OAUTH_KV.get("nycu_token:existing-grant"))!);
     expect(tokenRecord.access_token).toBe("new-upstream-token");
     expect(await env.OAUTH_KV.get("session:existing-grant")).toBeNull();
+    await expectTokenTtl("nycu_token:existing-grant", 259200);
   });
 
   it("mode: initial 成功時：完成 downstream 授權、簽發新 grantId，導回原本註冊的 client", async () => {
@@ -174,6 +185,7 @@ describe("/callback 成功路徑（mode: initial / reauth）", () => {
     expect(newTokenKeys).toHaveLength(1);
     const tokenRecord = JSON.parse((await env.OAUTH_KV.get(newTokenKeys[0]))!);
     expect(tokenRecord.access_token).toBe("nycu-access-token");
+    await expectTokenTtl(newTokenKeys[0], 259200);
   });
 });
 

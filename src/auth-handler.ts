@@ -47,6 +47,27 @@ async function ensureClientId(env: Env, redirectUri: string): Promise<string> {
   return data.client_id;
 }
 
+/** KV 的 expirationTtl 最小值是 60 秒。 */
+const KV_MIN_TTL_SECONDS = 60;
+
+/**
+ * 寫入 nycu_token:<grantId>，KV TTL 跟 upstream token 的 expires_in 一致（目前是 259200 秒 = 3 天），
+ * 過期後由 KV 自動清掉，不會在 KV 裡越積越多。KV 裡找不到 token 時 search/fetch 一樣回傳
+ * 「請呼叫 reauth」，跟拿過期 token 去打 upstream 收到 401 的結果相同。
+ * upstream 沒給 expires_in 時不設 TTL（維持舊行為）。
+ */
+async function putNycuToken(env: Env, grantId: string, nycuToken: any): Promise<void> {
+  const expiresIn = Number(nycuToken?.expires_in);
+  const options = Number.isFinite(expiresIn) && expiresIn > 0
+    ? { expirationTtl: Math.max(KV_MIN_TTL_SECONDS, Math.floor(expiresIn)) }
+    : undefined;
+  await env.OAUTH_KV.put(
+    `nycu_token:${grantId}`,
+    JSON.stringify({ ...nycuToken, obtained_at: Date.now() }),
+    options
+  );
+}
+
 /**
  * 統一產生「導去 NYCU 登入」的重新導向 Response。
  * mode === "initial"：第一次完成 downstream OAuth 授權用。
@@ -162,10 +183,7 @@ export default {
 
       if (mode === "reauth") {
         const { grantId } = parsed;
-        await env.OAUTH_KV.put(
-          `nycu_token:${grantId}`,
-          JSON.stringify({ ...nycuToken, obtained_at: Date.now() })
-        );
+        await putNycuToken(env, grantId, nycuToken);
         // 舊的 upstream session 是綁在舊 token 上取得的，一併清掉，
         // 讓下一次 search/fetch 強制重新對上游 initialize。
         await env.OAUTH_KV.delete(`session:${grantId}`);
@@ -182,10 +200,7 @@ export default {
       // mode === "initial"（或缺省，向後相容舊資料）
       const { oauthReqInfo } = parsed;
       const grantId = crypto.randomUUID();
-      await env.OAUTH_KV.put(
-        `nycu_token:${grantId}`,
-        JSON.stringify({ ...nycuToken, obtained_at: Date.now() })
-      );
+      await putNycuToken(env, grantId, nycuToken);
 
       const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
         request: oauthReqInfo,
